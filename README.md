@@ -1,2 +1,2 @@
 # iFoundAnApple-Backend
-Backend service for iFoundAnApple platform. Features payment processing (İyzico/Paynet), cargo company integrations (MNG, Yurtiçi, Aras), escrow management, and comprehensive admin panel APIs. 
+Backend service for iFoundAnApple platform. Features payment processing (Stripe/Paynet), cargo company integrations (Yurtiçi), escrow management, and comprehensive admin panel APIs. 
