@@ -15,8 +15,8 @@ async function bootstrap(): Promise<void> {
       whitelist: true,
       forbidNonWhitelisted: true,
       transform: true,
-      transformOptions: { enableImplicitConversion: true }
-    })
+      transformOptions: { enableImplicitConversion: true },
+    }),
   );
 
   const configService = app.get(ConfigService);
@@ -26,4 +26,3 @@ async function bootstrap(): Promise<void> {
 }
 
 void bootstrap();
-

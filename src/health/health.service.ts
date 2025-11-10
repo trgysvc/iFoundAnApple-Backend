@@ -7,8 +7,7 @@ export class HealthService {
     return {
       status: 'ok',
       uptime: process.uptime(),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     };
   }
 }
-

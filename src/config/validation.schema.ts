@@ -1,11 +1,19 @@
 import * as Joi from 'joi';
 
 export const validationSchema = Joi.object({
-  NODE_ENV: Joi.string()
-    .valid('development', 'production', 'test')
-    .default('development'),
+  NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
   PORT: Joi.number().port().default(3000),
-  SUPABASE_URL: Joi.string().uri({ scheme: ['http', 'https'] }).required(),
-  SUPABASE_SERVICE_ROLE_KEY: Joi.string().min(10).required()
+  SUPABASE_URL: Joi.string()
+    .uri({ scheme: ['http', 'https'] })
+    .required(),
+  SUPABASE_SERVICE_ROLE_KEY: Joi.string().min(10).required(),
+  SUPABASE_JWKS_URL: Joi.string()
+    .uri({ scheme: ['http', 'https'] })
+    .required(),
+  SUPABASE_JWT_AUDIENCE: Joi.string().default('authenticated'),
+  SUPABASE_JWT_ISSUER: Joi.string()
+    .uri({ scheme: ['http', 'https'] })
+    .required(),
+  AUTH_CACHE_TTL_SECONDS: Joi.number().min(30).default(60),
+  AUTH_ADMIN_ROLES: Joi.string().default('admin'),
 });
-

@@ -3,4 +3,3 @@ export interface HealthResponse {
   uptime: number;
   timestamp: string;
 }
-
