@@ -1,0 +1,29 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage
+coverage
+lcov.info
+
+# Compiled output
+dist
+build
+
+# Dependency directories
+node_modules/
+
+# Env files
+.env
+.env.test
+
+# OS files
+.DS_Store
+

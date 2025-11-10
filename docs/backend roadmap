@@ -1,0 +1,81 @@
+iFoundAnApple Backend - Geliştirilmiş Yol Haritası (Cursor AI için Notlarla)
+Hedef Domain: api.ifoundanapple.comTeknoloji: Node.js + NestJSVersiyon: 1.0.0Oluşturulma Tarihi: 2025-11-06 (Revize: 2025-11-10)
+🎯 Projenin Ana Hedefi ve Güvenlik Felsefesi
+Bu backend'in varoluş amacı, iFoundAnApple platformunun güvenlik ve güvenilirlik merkezini oluşturmaktır. Frontend (React uygulaması) kullanıcı arayüzü ve Supabase ile doğrudan veri okuma/yazma işlemlerini yönetirken, backend aşağıdaki gibi hassas ve kritik operasyonlardan sorumludur:
+	1	🔐 Ödeme İşlemleri: Tüm finansal işlemlerin güvenli bir şekilde yönetilmesi.
+	2	📦 Kargo Entegrasyonları: Kargo firmalarıyla olan tüm iletişimin güvenli ve merkezi bir yerden yapılması.
+	3	👨‍💼 Yönetim (Admin) Süreçleri: Platformun denetim ve müdahale gerektiren işlemlerinin yetkilendirilmiş bir arayüzle sağlanması.
+Cursor'a Kritik Not: Geliştirme yaparken temel prensip şu olmalıdır: Frontend'den gelen hiçbir veriye körü körüne güvenme. Frontend'den gelen her türlü veri (kullanıcı ID'si, ödenecek tutar, cihaz ID'si vb.) backend'de mutlaka doğrulanmalı, yeniden hesaplanmalı ve yetki kontrollerinden geçirilmelidir. Bu, projenin en temel güvenlik ilkesidir.
+
+🚀 Öncelikli Geliştirme Planı
+Belirttiğiniz üzere, projenin en hızlı ve güvenli şekilde hayata geçmesi için geliştirme fazlarını aşağıdaki öncelik sırasına göre düzenledim:
+Öncelik
+Faz
+Hedef
+Tahmini Süre
+1
+Faz 1: Temel Altyapı ve Güvenlik
+Projenin iskeletini kurmak, Supabase bağlantısını ve temel kimlik doğrulama (Authentication) mekanizmasını oluşturmak.
+1 Hafta
+2
+Faz 2: PAYNET ile Ödeme Entegrasyonu
+En kritik ve ilk canlıya alınacak özellik. Güvenli ödeme altyapısını ve emanet (escrow) sisteminin temelini oluşturmak. Ücret doğrulama mekanizması bu fazda hayata geçirilecektir.
+2 Hafta
+3
+Faz 3: Kargo Entegrasyonu
+Ödeme sonrası kargo kodu oluşturma ve takip süreçlerini otomatikleştirmek. İlk olarak Yurtiçi Kargo ile başlanabilir.
+1-2 Hafta
+4
+Faz 4: Admin Paneli API'leri
+Yönetimsel müdahaleler (kullanıcı yönetimi, ödeme takibi, ihtilaf çözümü) için gerekli temel API endpoint'lerini oluşturmak.
+1-2 Hafta
+5
+Diğer Fazlar
+Zamanlanmış görevler, bildirimler, kapsamlı test ve production hazırlıkları.
+2-3 Hafta
+Toplam Öncelikli Süre: ~6-8 hafta
+
+🛠️ Teknoloji Yığını ve Mimari
+(Mevcut planınızdaki teknoloji yığını ve mimari tasarım (proje yapısı) son derece uygun ve modern standartlardadır. Bu bölümlerde herhangi bir değişiklik yapmaya gerek yoktur. Geliştirme sırasında bu yapıya sadık kalınması önerilir.)
+
+Phase-by-Phase Geliştirme Detayları
+Faz 1: Temel Altyapı ve Güvenlik (Hafta 1)
+Hedef: NestJS projesinin kurulması, konfigürasyon yönetimi ve Supabase ile JWT tabanlı kimlik doğrulamanın ayağa kaldırılması.
+Görevler:
+	•	NestJS projesi oluşturma ve temel modül yapısının kurulması.@nestjs/config ile environment variables yönetimi. (.env dosyası)Supabase client servisinin oluşturulması ve SUPABASE_SERVICE_ROLE_KEY ile güvenli bağlantı.@nestjs/passport ve passport-jwt kullanarak Supabase JWT token'larını doğrulayan bir AuthGuard oluşturulması.Temel AdminGuard yapısının oluşturulması (kullanıcının rolünü kontrol edecek).Global ValidationPipe ve ExceptionFilter kurulumu.Swagger/OpenAPI entegrasyonu.
+Cursor'a Not: AuthGuard oluşturulurken, Supabase'in public key'ini kullanarak gelen JWT'nin geçerliliğini doğrulamalısın. Supabase JWT'leri standart bir yapıya sahiptir ve bu, güvenli bir kimlik doğrulama katmanı sağlar. Backend'deki tüm korumalı endpoint'ler bu AuthGuard ile güvence altına alınmalıdır.
+Faz 2: PAYNET ile Ödeme Entegrasyonu ve Escrow Yönetimi (Hafta 2-3)
+Hedef: Platformun en kritik özelliği olan ödeme alma ve emanet (escrow) sistemini PAYNET entegrasyonu ile hayata geçirmek.
+Görevler:
+	1	Payments Modülü Oluşturma:
+	◦	payments.controller.ts, payments.service.ts ve payments.module.ts dosyalarını oluştur.POST /api/payments/process endpoint'ini tanımla. Bu endpoint AuthGuard ile korunmalıdır.
+	2	Ücret Doğrulama Servisi (En Kritik Güvenlik Adımı):
+	◦	Frontend'den gelen ödeme talebi içinde (ProcessPaymentDto) deviceId ve totalAmount gibi bilgiler olacak.Backend, deviceId kullanarak devices ve device_models tablolarından cihazın olması gereken ifoundanapple_fee değerini çekmelidir.Aşağıdaki formülü backend'de yeniden hesapla:code Code    totalAmount = ifoundanapple_fee (veritabanından alınacak)
+	◦	gatewayFee = totalAmount * 0.0343
+	◦	cargoFee = 250.00
+	◦	rewardAmount = totalAmount * 0.20
+	◦	serviceFee = totalAmount - gatewayFee - cargoFee - rewardAmount
+	◦	  Backend'de hesaplanan totalAmount ile frontend'den gelen tutarı karşılaştır. Eğer tutarsızlık varsa, işlemi 400 Bad Request veya 422 Unprocessable Entity hatası ile reddet.
+Cursor'a Kritik Not: Bu ücret doğrulama adımı, manipülasyonu önlemek için hayati önem taşır. Asla frontend'den gelen fiyata güvenerek ödeme işlemi başlatma. Her zaman veritabanındaki "source of truth" (gerçeğin kaynağı) olan fiyattan yola çıkarak hesaplamayı backend'de yap.
+	1	PAYNET Entegrasyonu:
+	◦	PAYNET için özel bir PaynetProvider servisi oluştur.PAYNET API'sine istek atmak için @nestjs/axios kullan. API key ve secret key gibi hassas bilgileri .env dosyasından al.Ödeme işlemini başlatmak için PAYNET'in ilgili endpoint'ine istek at.Ödeme başarılı olduğunda veritabanı kayıtlarını oluştur (payments, escrow_accounts, financial_transactions). devices tablosunun status alanını payment_completed olarak güncelle.
+	2	Webhook Yönetimi:
+	◦	POST /api/webhooks/paynet-callback endpoint'ini oluştur.Gelen webhook isteğinin gerçekten PAYNET'ten geldiğini doğrulamak için signature verification (imza doğrulama) mekanizmasını uygula. Bu adım atlanamaz.Idempotency kontrolü ekle (aynı webhook'un birden fazla işlenmesini önlemek için).
+Faz 3: Kargo Entegrasyonu (Hafta 4-5)
+Hedef: Ödemesi tamamlanmış işlemler için kargo kodu üretmek ve gönderi sürecini yönetmek.
+Görevler:
+	•	CargoModule ve ilgili servisleri/controller'ları oluştur.Yurtiçi Kargo API'si için bir YurticiProvider oluştur.Ödeme başarıyla tamamlandığında (payment_completed durumunda) tetiklenecek bir servis metodu yaz. Bu metod, YurticiProvider'ı çağırarak gönderi oluşturma işlemini başlatır.Gönderi oluşturma API'sine istek atarken, PROCESS_FLOW.md dosyasında belirtildiği gibi kullanıcıların kişisel bilgileri (adres vb.) gizli kalacak şekilde anonim ID'ler (FND-XXX, OWN-XXX) kullan.Kargo API'sinden dönen teslim kodu (code) ve takip numarasını (tracking_number) alarak cargo_shipments tablosuna kaydet.
+Cursor'a Not: Kargo teslim kodu sistem tarafından üretilmez. Bu kod, kargo firmasının API'sinden gelen yanıttan alınır. Bulan kullanıcının arayüzde bir form doldurmasına gerek yoktur. Sadece ödeme tamamlandıktan sonra kendisine gösterilen bu hazır kod ile kargo şubesine gitmesi yeterlidir. Bu akış, kullanıcı deneyimini basitleştirir ve hata payını azaltır.
+	•	Kargo durumu güncellemeleri için POST /api/webhooks/cargo/yurtici gibi bir webhook endpoint'i oluştur ve imza doğrulamasını uygula.
+Faz 4: Admin Paneli API'leri (Hafta 6-7)
+Hedef: Platformu yönetmek için temel CRUD ve yönetimsel işlemleri sağlayan API'leri oluşturmak.
+Görevler:
+	•	AdminModule oluştur ve tüm endpoint'leri AdminGuard ile koru.Kullanıcı Yönetimi: Kullanıcı listeleme, durumunu değiştirme (GET /api/admin/users, PATCH /api/admin/users/:id/status).Ödeme Yönetimi: Ödeme işlemlerini listeleme, detaylarını görme ve manuel iade (POST /api/admin/payments/:id/refund) veya manuel escrow serbest bırakma (POST /api/admin/escrow/release) gibi kritik işlemleri gerçekleştirme.İhtilaf Yönetimi: DISPUTED durumundaki işlemleri yönetmek ve çözüme kavuşturmak için endpoint'ler (GET /api/admin/disputes, POST /api/admin/disputes/:id/resolve).
+Cursor'a Not: PROCESS_FLOW.md dosyasında cihaz eşleştirme ve durum güncellemelerinin frontend'de yapıldığı belirtiliyor. Bu, başlangıç için yeterli olabilir. Ancak admin panelinde, bir işlemin takılması veya yanlış gitmesi durumunda admin'in cihaz durumunu manuel olarak güncelleyebileceği (PATCH /api/admin/devices/:id/status) bir endpoint'in olması, ileride yaşanabilecek sorunları çözmek için çok faydalı olacaktır. Bu endpoint, service_role_key kullanarak RLS kurallarını atlayarak Supabase'e yazmalıdır.
+
+✅ Sonuç ve Özet
+Bu geliştirilmiş yol haritası, projenizin en kritik özelliklerine odaklanarak sizi adım adım hedefe ulaştıracaktır.
+	1	Güvenlik Her Şeydir: Backend'in ana amacı budur. Her adımda bu ilkeyi gözetin.
+	2	Önceliklendirme: İlk olarak PAYNET ödeme akışını tamamlayıp test ederek projenin en riskli kısmını halledin.
+	3	Net Sorumluluklar: Backend, finans ve harici API entegrasyonlarının merkezidir. Frontend ise kullanıcı deneyimi ve Supabase ile doğrudan (ama RLS korumalı) veri alışverişinden sorumludur.
+	4	Cursor Notları: Kodlama sırasında eklediğim Cursor'a Not bölümleri, yapay zekanın doğru ve güvenli kod üretmesine yardımcı olacak kritik hatırlatmalardır.
