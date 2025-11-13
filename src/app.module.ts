@@ -9,6 +9,8 @@ import { validationSchema } from './config/validation.schema';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { HealthModule } from './health/health.module';
 import { SupabaseModule } from './supabase/supabase.module';
+import { PaymentsModule } from './payments/payments.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 
 @Module({
   imports: [
@@ -20,6 +22,8 @@ import { SupabaseModule } from './supabase/supabase.module';
     AuthModule,
     SupabaseModule,
     HealthModule,
+    PaymentsModule,
+    WebhooksModule,
   ],
   controllers: [AppController],
   providers: [

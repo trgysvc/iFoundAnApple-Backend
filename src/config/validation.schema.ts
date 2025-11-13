@@ -16,4 +16,11 @@ export const validationSchema = Joi.object({
     .required(),
   AUTH_CACHE_TTL_SECONDS: Joi.number().min(30).default(60),
   AUTH_ADMIN_ROLES: Joi.string().default('admin'),
+  PAYNET_API_URL: Joi.string().uri({ scheme: ['http', 'https'] }).allow('').optional(),
+  PAYNET_API_KEY: Joi.string().allow('').optional(),
+  PAYNET_SECRET_KEY: Joi.string().allow('').optional(),
+  PAYNET_PUBLISHABLE_KEY: Joi.string().allow('').optional(),
+  PAYNET_ALLOWED_IPS: Joi.string().allow('').optional(),
+  FRONTEND_URL: Joi.string().uri({ scheme: ['http', 'https'] }).allow('').optional(),
+  BACKEND_URL: Joi.string().uri({ scheme: ['http', 'https'] }).allow('').optional(),
 });
