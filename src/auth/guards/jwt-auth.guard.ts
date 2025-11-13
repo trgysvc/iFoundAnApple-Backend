@@ -1,16 +1,21 @@
 import { ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { AuthGuard } from '@nestjs/passport';
-import { Observable } from 'rxjs';
+import { SupabaseService } from '../../supabase/supabase.service';
+import { AuthService } from '../auth.service';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { SupabaseJwtGuard } from './supabase-jwt.guard';
 
 @Injectable()
-export class JwtAuthGuard extends AuthGuard('jwt') {
-  constructor(private readonly reflector: Reflector) {
-    super();
+export class JwtAuthGuard extends SupabaseJwtGuard {
+  constructor(
+    supabaseService: SupabaseService,
+    authService: AuthService,
+    private readonly reflector: Reflector,
+  ) {
+    super(supabaseService, authService);
   }
 
-  canActivate(context: ExecutionContext): boolean | Promise<boolean> | Observable<boolean> {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
       context.getClass(),
