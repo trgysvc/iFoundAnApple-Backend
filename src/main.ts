@@ -10,7 +10,7 @@ async function bootstrap(): Promise<void> {
   const logger = new Logger('Bootstrap');
 
   app.use(helmet());
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('v1');
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -39,7 +39,7 @@ async function bootstrap(): Promise<void> {
     .build();
 
   const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('api/docs', app, document, {
+  SwaggerModule.setup('v1/docs', app, document, {
     swaggerOptions: {
       persistAuthorization: true,
     },
@@ -49,7 +49,7 @@ async function bootstrap(): Promise<void> {
   const port = configService.get<number>('app.port', 3000);
   await app.listen(port);
   logger.log(`Application is running on port ${port}`);
-  logger.log(`Swagger documentation available at http://localhost:${port}/api/docs`);
+  logger.log(`Swagger documentation available at http://localhost:${port}/v1/docs`);
 }
 
 void bootstrap();

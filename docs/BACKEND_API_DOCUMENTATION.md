@@ -19,12 +19,12 @@
 
 **Development:**
 ```
-http://localhost:3000/api
+http://localhost:3000/v1
 ```
 
 **Production:**
 ```
-https://api.ifoundanapple.com/api
+https://api.ifoundanapple.com/v1
 ```
 
 ### API Versiyonu
@@ -39,7 +39,7 @@ https://api.ifoundanapple.com/api
 Backend'de interaktif API dokümantasyonu mevcuttur:
 
 ```
-http://localhost:3000/api/docs
+http://localhost:3000/v1/docs
 ```
 
 Swagger UI'da tüm endpoint'leri test edebilir, request/response formatlarını görebilirsiniz.
@@ -72,7 +72,7 @@ Authorization: Bearer <supabase_jwt_token>
 ```javascript
 const token = supabase.auth.session()?.access_token;
 
-fetch('http://localhost:3000/api/session', {
+fetch('http://localhost:3000/v1/session', {
   headers: {
     'Authorization': `Bearer ${token}`,
     'Content-Type': 'application/json'
@@ -90,7 +90,7 @@ fetch('http://localhost:3000/api/session', {
 
 Bazı endpoint'ler authentication gerektirmez (public):
 
-- `GET /api/health` - Health check
+- `GET /v1/health` - Health check
 
 ---
 
@@ -98,7 +98,7 @@ Bazı endpoint'ler authentication gerektirmez (public):
 
 ### Health Check
 
-#### `GET /api/health`
+#### `GET /v1/health`
 
 Backend'in çalışıp çalışmadığını kontrol eder.
 
@@ -120,7 +120,7 @@ Backend'in çalışıp çalışmadığını kontrol eder.
 
 ### Authentication & Session
 
-#### `GET /api/session`
+#### `GET /v1/session`
 
 Mevcut kullanıcının session bilgilerini döner.
 
@@ -148,7 +148,7 @@ Mevcut kullanıcının session bilgilerini döner.
 
 ### Payments
 
-#### `POST /api/payments/process`
+#### `POST /v1/payments/process`
 
 Eşleşmiş bir cihaz için ödeme işlemini başlatır.
 
@@ -218,7 +218,54 @@ Eşleşmiş bir cihaz için ödeme işlemini başlatır.
 
 ---
 
-#### `GET /api/payments/test-paynet-connection`
+#### `POST /v1/payments/complete-3d`
+
+3D Secure doğrulaması sonrası ödemeyi tamamlar. Frontend, PAYNET callback'inden gelen `session_id` ve `token_id`'yi bu endpoint'e gönderir.
+
+**Authentication:** Gerekli (Bearer Token)
+
+**Request Body:**
+```json
+{
+  "paymentId": "123e4567-e89b-12d3-a456-426614174000",
+  "sessionId": "session_abc123xyz",
+  "tokenId": "token_xyz789abc"
+}
+```
+
+**Request Fields:**
+- `paymentId` (string, UUID, **ZORUNLU**): Ödeme başlatma sırasında alınan payment ID
+- `sessionId` (string, **ZORUNLU**): PAYNET 3D Secure callback'inden gelen session ID
+- `tokenId` (string, **ZORUNLU**): PAYNET 3D Secure callback'inden gelen token ID
+
+**Response:**
+```json
+{
+  "success": true,
+  "paymentId": "123e4567-e89b-12d3-a456-426614174000",
+  "message": "3D Secure payment completed. Waiting for webhook confirmation."
+}
+```
+
+**Status Codes:**
+- `200 OK` - 3D Secure ödeme başarıyla tamamlandı
+- `400 Bad Request` - Geçersiz request, payment zaten işlenmiş veya kullanıcıya ait değil
+- `401 Unauthorized` - Geçersiz token
+- `404 Not Found` - Payment bulunamadı
+
+**Güvenlik Kontrolleri:**
+- Payment'ın kullanıcıya ait olduğu doğrulanır (`payer_id` kontrolü)
+- Payment'ın `pending` status'ünde olduğu kontrol edilir
+- Session ID ve Token ID PAYNET'e gönderilir
+
+**Önemli Notlar:**
+1. Bu endpoint, 3D Secure doğrulaması sonrası çağrılmalıdır
+2. Final payment status webhook ile güncellenir (`POST /v1/webhooks/paynet-callback`)
+3. Frontend, webhook gelene kadar payment status'u polling veya real-time subscription ile takip edebilir
+
+---
+
+#### `GET /v1/payments/test-paynet-connection`
 
 PAYNET API bağlantısını ve konfigürasyonu test eder.
 
@@ -267,7 +314,7 @@ PAYNET API bağlantısını ve konfigürasyonu test eder.
 
 ### Admin Endpoints
 
-#### `GET /api/admin/diagnostics`
+#### `GET /v1/admin/diagnostics`
 
 Admin tanılama endpoint'i (sadece admin kullanıcılar).
 
@@ -321,7 +368,7 @@ BACKEND_URL=http://localhost:3000
 
 #### 1. Ödeme Başlatma (Backend)
 
-Frontend, `POST /api/payments/process` endpoint'ini çağırır. Backend:
+Frontend, `POST /v1/payments/process` endpoint'ini çağırır. Backend:
 
 1. Tutarı doğrular (veritabanından)
 2. Payment ve escrow kayıtlarını oluşturur
@@ -346,11 +393,35 @@ http://localhost:3000/payment/callback?session_id=xxx&token_id=yyy
 
 Frontend, `session_id` ve `token_id`'yi backend'e gönderir. Backend:
 
-1. PAYNET'e `POST /v2/transaction/tds_charge` isteği gönderir
-2. Ödeme tamamlanır
-3. Webhook beklenir (veya direkt sonuç döner)
+1. Payment'ı doğrular (kullanıcı sahipliği, status kontrolü)
+2. PAYNET'e `POST /v2/transaction/tds_charge` isteği gönderir
+3. Ödeme tamamlanır
+4. Webhook beklenir (final payment status webhook ile güncellenir)
 
-**Not:** Şu anda backend'de 3D tamamlama endpoint'i yok. Frontend, `session_id` ve `token_id`'yi backend'e göndermeli ve backend bunu PAYNET'e iletmelidir. Bu endpoint eklenebilir.
+**Endpoint:** `POST /v1/payments/complete-3d`
+
+**Request Body:**
+```json
+{
+  "paymentId": "payment-uuid-123",
+  "sessionId": "session_abc123",
+  "tokenId": "token_xyz789"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "paymentId": "payment-uuid-123",
+  "message": "3D Secure payment completed. Waiting for webhook confirmation."
+}
+```
+
+**Güvenlik Kontrolleri:**
+- Payment'ın kullanıcıya ait olduğu doğrulanır
+- Payment'ın `pending` status'ünde olduğu kontrol edilir
+- Session ID ve Token ID PAYNET'e gönderilir
 
 ### PAYNET Escrow Yönetimi
 
@@ -377,7 +448,7 @@ Cihaz teslim edildiğinde, backend PAYNET escrow'u serbest bırakır:
 
 ### PAYNET Publishable Key
 
-Frontend, PAYNET entegrasyonu için `publishableKey` kullanabilir. Bu key, `POST /api/payments/process` response'unda döner.
+Frontend, PAYNET entegrasyonu için `publishableKey` kullanabilir. Bu key, `POST /v1/payments/process` response'unda döner.
 
 **Güvenlik:** Publishable key frontend'de kullanılabilir, ancak secret key asla frontend'e gönderilmemelidir.
 
@@ -387,7 +458,7 @@ Frontend, PAYNET entegrasyonu için `publishableKey` kullanabilir. Bu key, `POST
 
 ### PAYNET Webhook
 
-#### `POST /api/webhooks/paynet-callback`
+#### `POST /v1/webhooks/paynet-callback`
 
 PAYNET, ödeme tamamlandığında bu endpoint'e webhook gönderir.
 
@@ -459,7 +530,7 @@ PAYNET, ödeme tamamlandığında bu endpoint'e webhook gönderir.
 PAYNET yönetim panelinde `confirmation_url` olarak şu URL ayarlanmalıdır:
 
 ```
-https://api.ifoundanapple.com/api/webhooks/paynet-callback
+https://api.ifoundanapple.com/v1/webhooks/paynet-callback
 ```
 
 ---
@@ -475,7 +546,7 @@ Tüm hatalar aşağıdaki format ile döner:
   "statusCode": 400,
   "message": "Error message",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/payments/process"
+  "path": "/v1/payments/process"
 }
 ```
 
@@ -499,7 +570,7 @@ Tüm hatalar aşağıdaki format ile döner:
   "statusCode": 400,
   "message": "Amount mismatch. Expected: 2000.0, Received: 1500.0",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/payments/process"
+  "path": "/v1/payments/process"
 }
 ```
 
@@ -509,7 +580,7 @@ Tüm hatalar aşağıdaki format ile döner:
   "statusCode": 400,
   "message": "Device 123e4567-e89b-12d3-a456-426614174000 is not in 'matched' status. Current status: lost",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/payments/process"
+  "path": "/v1/payments/process"
 }
 ```
 
@@ -519,7 +590,7 @@ Tüm hatalar aşağıdaki format ile döner:
   "statusCode": 400,
   "message": "User df612602-69f0-4e3c-ac31-f23c5ada8d77 is not the owner of device 123e4567-e89b-12d3-a456-426614174000",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/payments/process"
+  "path": "/v1/payments/process"
 }
 ```
 
@@ -531,7 +602,7 @@ Tüm hatalar aşağıdaki format ile döner:
   "statusCode": 401,
   "message": "Missing or invalid token",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/session"
+  "path": "/v1/session"
 }
 ```
 
@@ -541,7 +612,7 @@ Tüm hatalar aşağıdaki format ile döner:
   "statusCode": 401,
   "message": "Invalid or expired token",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/session"
+  "path": "/v1/session"
 }
 ```
 
@@ -553,7 +624,7 @@ Tüm hatalar aşağıdaki format ile döner:
   "statusCode": 404,
   "message": "Device not found: 123e4567-e89b-12d3-a456-426614174000",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/payments/process"
+  "path": "/v1/payments/process"
 }
 ```
 
@@ -574,7 +645,7 @@ import axios from 'axios';
 import { supabase } from './supabase';
 
 const api = axios.create({
-  baseURL: 'http://localhost:3000/api',
+  baseURL: 'http://localhost:3000/v1',
 });
 
 api.interceptors.request.use(async (config) => {
@@ -605,12 +676,24 @@ api.interceptors.request.use(async (config) => {
    - Veya `html_content` varsa iframe içinde gösterin
 
 3. **Return URL İşleme:**
-   - `return_url`'e gelen `session_id` ve `token_id`'yi alın
-   - Backend'e gönderin (şu anda endpoint yok, eklenebilir)
+   ```javascript
+   // Callback sayfasında session_id ve token_id'yi al
+   const sessionId = searchParams.get('session_id');
+   const tokenId = searchParams.get('token_id');
+   const paymentId = localStorage.getItem('current_payment_id');
+   
+   // Backend'e 3D tamamlama isteği gönder
+   const response = await api.post('/payments/complete-3d', {
+     paymentId,
+     sessionId,
+     tokenId
+   });
+   ```
 
 4. **Webhook Bekleme:**
-   - Webhook gelene kadar polling yapabilirsiniz
-   - Veya WebSocket ile real-time güncelleme alabilirsiniz
+   - Backend'den başarılı yanıt geldikten sonra webhook beklenir
+   - Payment status'u polling veya real-time subscription ile takip edilir
+   - Payment status `completed` olduğunda success sayfasına yönlendirilir
 
 ### 3. Tutar Doğrulama
 
@@ -696,7 +779,7 @@ Backend CORS aktif. Frontend URL'i `.env` dosyasında `FRONTEND_URL` olarak tan�
 
 **Request:**
 ```bash
-curl -X GET http://localhost:3000/api/health
+curl -X GET http://localhost:3000/v1/health
 ```
 
 **Response:**
@@ -714,7 +797,7 @@ curl -X GET http://localhost:3000/api/health
 
 **Request:**
 ```bash
-curl -X GET http://localhost:3000/api/session \
+curl -X GET http://localhost:3000/v1/session \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
 
@@ -733,7 +816,7 @@ curl -X GET http://localhost:3000/api/session \
 
 **Request:**
 ```bash
-curl -X POST http://localhost:3000/api/payments/process \
+curl -X POST http://localhost:3000/v1/payments/process \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -762,7 +845,7 @@ curl -X POST http://localhost:3000/api/payments/process \
   "statusCode": 400,
   "message": "Amount mismatch. Expected: 2000.0, Received: 1500.0",
   "timestamp": "2025-01-15T10:30:00.000Z",
-  "path": "/api/payments/process"
+  "path": "/v1/payments/process"
 }
 ```
 
@@ -772,7 +855,7 @@ curl -X POST http://localhost:3000/api/payments/process \
 
 **Request:**
 ```bash
-curl -X GET http://localhost:3000/api/payments/test-paynet-connection \
+curl -X GET http://localhost:3000/v1/payments/test-paynet-connection \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
 
@@ -844,7 +927,7 @@ curl -X GET http://localhost:3000/api/payments/test-paynet-connection \
 - [PAYNET API Referansı](./PAYNET_API_REFERENCE.md)
 - [Backend Roadmap](../docs/backend%20roadmap)
 - [Process Flow](./PROCESS_FLOW.md)
-- [Swagger UI](http://localhost:3000/api/docs)
+- [Swagger UI](http://localhost:3000/v1/docs)
 
 ---
 

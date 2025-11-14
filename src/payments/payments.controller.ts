@@ -6,6 +6,7 @@ import { firstValueFrom } from 'rxjs';
 import { RequestUser } from '../auth/interfaces/request-user.interface';
 import { ProcessPaymentDto } from './dto/process-payment.dto';
 import { PaymentResponseDto } from './dto/payment-response.dto';
+import { Complete3DPaymentDto } from './dto/complete-3d-payment.dto';
 import { PaymentsService } from './services/payments.service';
 import { PaynetProvider } from './providers/paynet.provider';
 
@@ -39,6 +40,39 @@ export class PaymentsController {
     }
 
     return this.paymentsService.processPayment(dto, user.id);
+  }
+
+  @ApiOperation({
+    summary: 'Complete 3D Secure payment after user verification',
+    description:
+      'Called after user completes 3D Secure verification on bank page. Frontend sends session_id and token_id from PAYNET callback.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: '3D Secure payment completed successfully. Waiting for webhook confirmation.',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        paymentId: { type: 'string', example: '123e4567-e89b-12d3-a456-426614174000' },
+        message: { type: 'string', example: '3D Secure payment completed. Waiting for webhook confirmation.' },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid request or payment already processed' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  @Post('complete-3d')
+  async complete3DPayment(
+    @Body() dto: Complete3DPaymentDto,
+    @Req() request: Request,
+  ): Promise<{ success: boolean; paymentId: string; message: string }> {
+    const user = request.user as RequestUser;
+    if (!user) {
+      throw new Error('User not found in request');
+    }
+
+    return this.paymentsService.complete3DPayment(dto, user.id);
   }
 
   @ApiOperation({ summary: 'Test PAYNET API connection and configuration' })

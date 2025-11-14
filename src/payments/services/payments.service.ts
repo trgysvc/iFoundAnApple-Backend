@@ -10,6 +10,7 @@ import { FeeValidationService } from './fee-validation.service';
 import { PaynetProvider } from '../providers/paynet.provider';
 import { ProcessPaymentDto } from '../dto/process-payment.dto';
 import { PaymentResponseDto } from '../dto/payment-response.dto';
+import { Complete3DPaymentDto } from '../dto/complete-3d-payment.dto';
 
 interface DeviceInfo {
   id: string;
@@ -188,6 +189,107 @@ export class PaymentsService {
     }
 
     return paymentId;
+  }
+
+  /**
+   * Complete 3D Secure payment after user verification
+   * Called after user completes 3D Secure verification on bank's page
+   * 
+   * Security: This endpoint validates that:
+   * 1. Payment exists and belongs to the user
+   * 2. Payment is in 'pending' status
+   * 3. Session ID and Token ID are valid
+   */
+  async complete3DPayment(
+    dto: Complete3DPaymentDto,
+    userId: string,
+  ): Promise<{ success: boolean; paymentId: string; message: string }> {
+    this.logger.log(
+      `Completing 3D payment: paymentId=${dto.paymentId}, userId=${userId}`,
+    );
+
+    // Get payment and verify ownership
+    const { data: payment, error: paymentError } = await this.supabase
+      .from('payments')
+      .select('id, payer_id, payment_status, provider_transaction_id')
+      .eq('id', dto.paymentId)
+      .single();
+
+    if (paymentError || !payment) {
+      this.logger.error(
+        `Payment not found: ${dto.paymentId}`,
+        paymentError,
+      );
+      throw new NotFoundException(`Payment not found: ${dto.paymentId}`);
+    }
+
+    // Security: Verify payment belongs to the user
+    if (payment.payer_id !== userId) {
+      this.logger.warn(
+        `User ${userId} attempted to complete payment ${dto.paymentId} that belongs to ${payment.payer_id}`,
+      );
+      throw new BadRequestException('Payment does not belong to the user');
+    }
+
+    // Verify payment is in pending status
+    if (payment.payment_status !== 'pending') {
+      this.logger.warn(
+        `Payment ${dto.paymentId} is not in pending status. Current status: ${payment.payment_status}`,
+      );
+      throw new BadRequestException(
+        `Payment is not in pending status. Current status: ${payment.payment_status}`,
+      );
+    }
+
+    // Complete 3D payment with PAYNET
+    try {
+      const paynetResponse = await this.paynetProvider.complete3DPayment({
+        session_id: dto.sessionId,
+        token_id: dto.tokenId,
+        transaction_type: 1, // 1 = Satış (Sale)
+      });
+
+      // Update payment with PAYNET response
+      // Note: Final payment status will be updated by webhook
+      // But we can update transaction_id if available
+      if (paynetResponse.transaction_id) {
+        await this.supabase
+          .from('payments')
+          .update({
+            provider_transaction_id: paynetResponse.transaction_id,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', dto.paymentId);
+      }
+
+      this.logger.log(
+        `3D payment completion initiated: paymentId=${dto.paymentId}, transactionId=${paynetResponse.transaction_id}`,
+      );
+
+      return {
+        success: true,
+        paymentId: dto.paymentId,
+        message: '3D Secure payment completed. Waiting for webhook confirmation.',
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to complete 3D payment: ${error.message}`,
+        error.stack,
+      );
+
+      // Update payment status to failed if PAYNET returns error
+      await this.supabase
+        .from('payments')
+        .update({
+          payment_status: 'failed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', dto.paymentId);
+
+      throw new BadRequestException(
+        `Payment completion failed: ${error.message}`,
+      );
+    }
   }
 
   private async updatePaymentWithProviderInfo(
