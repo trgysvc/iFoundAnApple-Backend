@@ -106,6 +106,24 @@ export class WebhooksService {
     const now = new Date().toISOString();
 
     // Update payment with PAYNET transaction details
+    // payments table schema: card_last_four, card_brand, card_holder_name exist
+    // provider_response is text (JSON string) for additional provider data
+    // Store PAYNET-specific fields in provider_response as JSON
+    const providerResponse = {
+      authorization_code: payload.authorization_code,
+      bank_id: payload.bank_id,
+      instalment: payload.instalment,
+      card_holder: payload.card_holder,
+      card_number: payload.card_number, // Masked: first 6 + last 4 digits
+      session_id: payload.session_id || null,
+      xact_date: payload.xact_date,
+      agent_id: payload.agent_id || null,
+    };
+
+    // Extract card last four from masked card number (last 4 digits)
+    const cardNumber = payload.card_number || '';
+    const cardLastFour = cardNumber.length >= 4 ? cardNumber.slice(-4) : null;
+
     const { error: paymentError } = await this.supabase
       .from('payments')
       .update({
@@ -114,12 +132,12 @@ export class WebhooksService {
         escrow_held_at: now,
         completed_at: now,
         updated_at: now,
-        provider_transaction_id: payload.order_id || payload.authorization_code, // PAYNET order_id or authorization_code
-        provider_authorization_code: payload.authorization_code,
-        provider_bank_id: payload.bank_id,
-        provider_instalment: payload.instalment,
-        provider_card_holder: payload.card_holder,
-        provider_card_number: payload.card_number, // Masked card number (first 6 + last 4 digits)
+        provider_transaction_id: payload.order_id || payload.authorization_code,
+        provider_response: JSON.stringify(providerResponse),
+        card_last_four: cardLastFour,
+        card_holder_name: payload.card_holder || null,
+        webhook_received_at: now,
+        threeds_status: payload.threeds_status || 'completed',
       })
       .eq('id', paymentId);
 

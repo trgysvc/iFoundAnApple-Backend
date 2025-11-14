@@ -17,7 +17,7 @@ interface DeviceInfo {
   userId: string;
   model: string;
   status: string;
-  matched_with_user_id?: string;
+  device_role?: string; // 'owner' or 'finder' - from schema
 }
 
 @Injectable()
@@ -57,21 +57,33 @@ export class PaymentsService {
       throw new BadRequestException('Device does not belong to the payer');
     }
 
-    if (device.status !== 'matched') {
+    // After matching, owner device status becomes 'payment_pending' to allow payment
+    // Process: matched → payment_pending → (payment) → payment_completed
+    if (
+      device.status !== 'payment_pending' &&
+      device.status !== 'PAYMENT_PENDING'
+    ) {
       throw new BadRequestException(
-        `Device must be in 'matched' status. Current status: ${device.status}`,
+        `Device must be in 'payment_pending' status to proceed with payment. Current status: ${device.status}. Please complete matching first.`,
       );
     }
 
-    if (!device.matched_with_user_id) {
-      throw new BadRequestException('Device has no matched finder');
+    // Get matched finder from payments table if payment already exists, 
+    // or from device matching logic (to be implemented in frontend/match service)
+    // For now, receiver_id will be set when payment is created
+    // TODO: Implement proper matching logic to get receiver_id (finder's user_id)
+    // This might require querying for matched device or using a matching table
+    const receiverId = await this.getMatchedReceiverId(device.id);
+    
+    if (!receiverId) {
+      throw new BadRequestException('Device has no matched finder. Please complete matching first.');
     }
 
     const paymentId = await this.createPaymentRecords(
       device,
       fees,
       payerUserId,
-      device.matched_with_user_id,
+      receiverId,
     );
 
     // Initiate 3D Secure payment with PAYNET
@@ -111,9 +123,10 @@ export class PaymentsService {
   }
 
   private async getDevice(deviceId: string): Promise<DeviceInfo> {
+    // Note: devices table uses camelCase columns: userId, serialNumber, etc.
     const { data, error } = await this.supabase
       .from('devices')
-      .select('id, userId, model, status, matched_with_user_id')
+      .select('id, userId, model, status, device_role')
       .eq('id', deviceId)
       .single();
 
@@ -123,6 +136,103 @@ export class PaymentsService {
     }
 
     return data as DeviceInfo;
+  }
+
+  /**
+   * Get matched receiver ID (finder's user_id) for a device
+   * Uses existing tables:
+   * 1. First check payments table (if payment already exists)
+   * 2. Then find matched device with same serialNumber and model
+   * 3. Alternative: Check audit_logs for device_matching event
+   */
+  private async getMatchedReceiverId(deviceId: string): Promise<string | null> {
+    // Option 1: Check if payment already exists with receiver_id
+    const { data: existingPayment, error: paymentError } = await this.supabase
+      .from('payments')
+      .select('receiver_id')
+      .eq('device_id', deviceId)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!paymentError && existingPayment?.receiver_id) {
+      return existingPayment.receiver_id;
+    }
+
+    // Option 2: Get current device info
+    const { data: currentDevice, error: deviceError } = await this.supabase
+      .from('devices')
+      .select('id, userId, model, serialNumber, status, device_role')
+      .eq('id', deviceId)
+      .single();
+
+    if (deviceError || !currentDevice) {
+      this.logger.error(`Device not found: ${deviceId}`, deviceError);
+      return null;
+    }
+
+    // Option 3: Find matched device with same serialNumber and model
+    // The matched device should have:
+    // - Same serialNumber and model
+    // - Different userId (not the same user)
+    // - Different device_role (if current is 'owner', finder should be 'finder' and vice versa)
+    // Note: Only owner device needs to be 'matched' status for payment.
+    // Finder device can have any status (REPORTED, matched, etc.) - we just need to find it.
+    const currentUserRole = (currentDevice as any).device_role || 'owner'; // Default to owner if null
+    const expectedMatchedRole = currentUserRole === 'owner' ? 'finder' : 'owner';
+
+    const { data: matchedDevice, error: matchedError } = await this.supabase
+      .from('devices')
+      .select('id, userId, device_role')
+      .eq('serialNumber', currentDevice.serialNumber)
+      .eq('model', currentDevice.model)
+      .neq('userId', currentDevice.userId) // Different user
+      .eq('device_role', expectedMatchedRole) // Opposite role (owner ↔ finder)
+      .maybeSingle();
+
+    if (!matchedError && matchedDevice?.userId) {
+      this.logger.log(
+        `Found matched device: ${matchedDevice.id} with finder user: ${matchedDevice.userId}`,
+      );
+      return matchedDevice.userId;
+    }
+
+    // Option 4: Check audit_logs as fallback
+    // Look for device_matching event with this device_id
+    const { data: auditLog, error: auditError } = await this.supabase
+      .from('audit_logs')
+      .select('event_data')
+      .eq('resource_type', 'device')
+      .eq('resource_id', deviceId)
+      .eq('event_type', 'device_matching')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!auditError && auditLog?.event_data) {
+      const eventData = auditLog.event_data as any;
+      if (eventData.finder_user_id) {
+        this.logger.log(`Found finder_user_id from audit_logs: ${eventData.finder_user_id}`);
+        return eventData.finder_user_id;
+      }
+      if (eventData.finderDeviceId) {
+        // If finderDeviceId is available, get its userId
+        const { data: finderDevice, error: finderDeviceError } = await this.supabase
+          .from('devices')
+          .select('userId')
+          .eq('id', eventData.finderDeviceId)
+          .single();
+
+        if (!finderDeviceError && finderDevice?.userId) {
+          return finderDevice.userId;
+        }
+      }
+    }
+
+    this.logger.warn(
+      `No receiver_id found for device ${deviceId}. Device is in matched status but no finder found.`,
+    );
+    return null;
   }
 
   private async createPaymentRecords(
@@ -179,14 +289,10 @@ export class PaymentsService {
       throw new BadRequestException('Failed to create escrow record');
     }
 
-    const { error: deviceError } = await this.supabase
-      .from('devices')
-      .update({ status: 'payment_pending', updated_at: new Date().toISOString() })
-      .eq('id', device.id);
-
-    if (deviceError) {
-      this.logger.error(`Failed to update device status: ${deviceError.message}`, deviceError);
-    }
+    // Device status is already 'payment_pending' at this point (set during matching phase)
+    // After payment is initiated, status will be updated to 'payment_completed' by webhook
+    // No need to update device status here as it's already in payment_pending state
+    this.logger.log(`Payment initiated for device ${device.id} with status: ${device.status}`);
 
     return paymentId;
   }
@@ -296,13 +402,23 @@ export class PaymentsService {
     paymentId: string,
     paynetResponse: any,
   ): Promise<void> {
+    // payments table schema: provider_transaction_id exists, provider_session_id doesn't
+    // Store session_id in provider_response JSONB or ignore if not critical
+    const updateData: any = {
+      provider_transaction_id: paynetResponse.transaction_id || paynetResponse.transactionId,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Store additional provider info in provider_response if needed
+    if (paynetResponse.session_id) {
+      // provider_response is text, could be JSON string
+      // For now, we'll just store transaction_id which is the main field
+      this.logger.debug(`PAYNET session_id received but not stored: ${paynetResponse.session_id}`);
+    }
+
     const { error } = await this.supabase
       .from('payments')
-      .update({
-        provider_transaction_id: paynetResponse.transaction_id || paynetResponse.transactionId,
-        provider_session_id: paynetResponse.session_id,
-        updated_at: new Date().toISOString(),
-      })
+      .update(updateData)
       .eq('id', paymentId);
 
     if (error) {

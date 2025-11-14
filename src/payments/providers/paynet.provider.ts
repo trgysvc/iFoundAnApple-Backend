@@ -140,9 +140,25 @@ export class PaynetProvider {
       this.logger.log(`Initiating 3D payment: ${endpoint}`);
       this.logger.debug(`Payment request: ${JSON.stringify({ ...request, pan: '***', cvc: '***' })}`);
 
-      // PAYNET uses HTTP Basic Authentication with secret_key
+      // Debug: Check if secret key is loaded
+      if (!this.config.secretKey) {
+        this.logger.error('PAYNET_SECRET_KEY is not loaded from environment variables');
+        throw new InternalServerErrorException('PAYNET configuration error: secret key not found');
+      }
+      
+      // Debug: Log secret key prefix (first 10 chars) for verification
+      this.logger.debug(`PAYNET Secret Key prefix: ${this.config.secretKey.substring(0, 10)}...`);
+      this.logger.debug(`PAYNET API URL: ${this.config.apiUrl}`);
+
+      // PAYNET uses HTTP Basic Authentication
+      // According to PAYNET docs: Authorization: Basic [Secret Key]
       // Format: Authorization: Basic base64(secret_key:)
+      // Note: Standard Basic Auth format requires base64 encoding of "username:password"
+      // For PAYNET, secret_key is used as username with empty password
       const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
+      
+      // Debug: Log auth header prefix (first 30 chars) for verification
+      this.logger.debug(`Authorization header prefix: Basic ${authHeader.substring(0, 30)}...`);
       
       const response = await firstValueFrom(
         this.httpService.post<Paynet3DPaymentResponse>(
@@ -150,7 +166,7 @@ export class PaynetProvider {
           request,
           {
             headers: {
-              'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with secret_key
+              'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with base64(secret_key:)
               'Content-Type': 'application/json',
             },
           },

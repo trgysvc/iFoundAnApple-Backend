@@ -101,15 +101,29 @@ export class FeeValidationService {
       throw new NotFoundException(`Device not found: ${deviceId}`);
     }
 
+    // Query device_models table with correct schema:
+    // - Match using model_name field (not 'model')
+    // - Filter by is_active = true
+    // - Schema has: name (unique), model_name, ifoundanapple_fee, is_active
     const { data: deviceModel, error: modelError } = await this.supabase
       .from('device_models')
-      .select('ifoundanapple_fee')
-      .eq('model', device.model)
+      .select('ifoundanapple_fee, name, model_name')
+      .eq('model_name', device.model)
+      .eq('is_active', true)
       .single();
 
     if (modelError || !deviceModel) {
-      this.logger.error(`Device model not found: ${device.model}`, modelError);
-      throw new NotFoundException(`Device model not found: ${device.model}`);
+      this.logger.error(`Device model not found or inactive: ${device.model}`, modelError);
+      throw new NotFoundException(
+        `Device model not found or inactive: ${device.model}. Please ensure the model exists and is active in device_models table.`,
+      );
+    }
+
+    if (!deviceModel.ifoundanapple_fee) {
+      this.logger.error(`Device model fee not set: ${device.model}`);
+      throw new NotFoundException(
+        `Device model fee not configured for: ${device.model}`,
+      );
     }
 
     return {
