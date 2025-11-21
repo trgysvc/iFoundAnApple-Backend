@@ -359,7 +359,6 @@ PAYNET_API_URL=https://api.paynet.com.tr
 PAYNET_API_KEY=your_api_key
 PAYNET_SECRET_KEY=your_secret_key
 PAYNET_PUBLISHABLE_KEY=your_publishable_key
-PAYNET_ALLOWED_IPS=104.21.232.181,172.67.202.100
 FRONTEND_URL=http://localhost:3000
 BACKEND_URL=http://localhost:3000
 ```
@@ -462,9 +461,7 @@ Frontend, PAYNET entegrasyonu için `publishableKey` kullanabilir. Bu key, `POST
 
 PAYNET, ödeme tamamlandığında bu endpoint'e webhook gönderir.
 
-**Authentication:** Gerekmez (IP whitelist ile korunur)
-
-**IP Whitelist:** PAYNET'in IP adresleri `.env` dosyasında `PAYNET_ALLOWED_IPS` olarak tanımlanmalıdır.
+**Authentication:** Gerekmez (PAYNET webhook signature ile doğrulanabilir)
 
 **Request Body (PAYNET Webhook Payload):**
 ```json
@@ -518,8 +515,7 @@ PAYNET, ödeme tamamlandığında bu endpoint'e webhook gönderir.
 
 **Webhook İşleme Adımları:**
 
-1. **IP Doğrulama:** İstek IP'si `PAYNET_ALLOWED_IPS` listesinde olmalıdır
-2. **Signature Verification:** Opsiyonel (header'da `x-paynet-signature` varsa doğrulanır)
+1. **Signature Verification:** Opsiyonel (header'da `x-paynet-signature` varsa doğrulanır)
 3. **Idempotency Check:** `reference_no` kullanılarak duplicate webhook kontrolü yapılır
 4. **Payment Update:** `is_succeed` değerine göre payment durumu güncellenir
 5. **Escrow Update:** Ödeme başarılıysa escrow `held` durumuna geçer

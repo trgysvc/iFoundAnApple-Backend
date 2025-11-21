@@ -20,7 +20,6 @@ export const validationSchema = Joi.object({
   PAYNET_API_KEY: Joi.string().allow('').optional(),
   PAYNET_SECRET_KEY: Joi.string().allow('').optional(),
   PAYNET_PUBLISHABLE_KEY: Joi.string().allow('').optional(),
-  PAYNET_ALLOWED_IPS: Joi.string().allow('').optional(),
   FRONTEND_URL: Joi.string().uri({ scheme: ['http', 'https'] }).allow('').optional(),
   BACKEND_URL: Joi.string().uri({ scheme: ['http', 'https'] }).allow('').optional(),
 });
