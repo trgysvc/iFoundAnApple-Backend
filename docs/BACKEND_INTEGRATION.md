@@ -931,6 +931,59 @@ try {
 }
 ```
 
+### 4.1. Ödeme Sürecindeki Aksaklıklar ve Önlemler
+
+Backend, Paynet dokümantasyonuna uygun olarak ([doc.paynet.com.tr](https://doc.paynet.com.tr)) aşağıdaki önlemleri almıştır:
+
+#### Paynet ile İletişim Kesilirse
+
+**Backend Önlemleri:**
+- ✅ **Retry Mekanizması:** Exponential backoff ile 3 deneme (1s, 2s, 4s gecikme)
+- ✅ **Timeout Ayarı:** 30 saniye timeout ile uzun süren istekler kesilir
+- ✅ **Aynı Reference No:** Paynet dokümantasyonuna göre, aynı `reference_no` ile retry yapılabilir - sistem önceki başarılı işlemi döndürür
+
+**Frontend/iOS Önlemleri:**
+- Ödeme başlatma başarısız olursa, kullanıcıya hata mesajı gösterilir
+- "Tekrar Dene" butonu ile kullanıcı tekrar deneme yapabilir
+- Payment kaydı `pending` durumunda kalır, kullanıcı tekrar ödeme yapabilir
+
+#### Ödeme İşlemi Olumsuz Sonuçlanırsa
+
+**Backend Önlemleri:**
+- ✅ Webhook'ta `is_succeed: false` geldiğinde otomatik işleme alınır
+- ✅ Payment status `failed` olarak güncellenir
+- ✅ Device status `payment_pending`'e döner (kullanıcı tekrar ödeme yapabilir)
+- ✅ Kullanıcıya bildirim gönderilir
+- ✅ Audit log kaydı oluşturulur
+
+**Frontend/iOS Önlemleri:**
+- Backend'den hata mesajı alınır ve kullanıcıya gösterilir
+- "Tekrar Dene" butonu ile ödeme sayfasına geri dönülür
+- Device status `payment_pending` olduğu için kullanıcı tekrar ödeme yapabilir
+
+#### Paynet Tarafında Aksaklık Sonucu Webhook Gelmezse
+
+**Backend Önlemleri:**
+- ✅ **Otomatik Payment Reconciliation:** Her 5 dakikada bir pending payment'lar kontrol edilir
+- ✅ **Webhook Storage:** Tüm webhook payload'ları `webhook_storage` tablosunda saklanır
+- ✅ **Retry Mekanizması:** Her 1 saatte bir başarısız webhook işlemleri tekrar denenir (maksimum 5 deneme)
+- ✅ **Manuel İnceleme:** 10 dakikadan eski pending payment'lar için audit log oluşturulur
+
+**Frontend/iOS Önlemleri:**
+- Polling mekanizması: 30 deneme, 10 saniye aralık (toplam 5 dakika)
+- Timeout durumunda kullanıcıya bilgi verilir
+- Backend'den payment status kontrol edilir
+
+#### Webhook İşleme Başarısız Olursa
+
+**Backend Önlemleri:**
+- ✅ Webhook `webhook_storage` tablosuna kaydedilir
+- ✅ Retry mekanizması ile otomatik tekrar deneme (maksimum 5 deneme)
+- ✅ Hata mesajı ve retry count kaydedilir
+- ✅ Her 1 saatte bir başarısız webhook'lar tekrar denenir
+
+**Referans:** Paynet dokümantasyonuna göre, bağlantı zaman aşımı durumunda aynı `reference_no` ile işlemi tekrarlayabilirsiniz. Sistem, daha önce başarılı bir işlem varsa onu döndürür. ([doc.paynet.com.tr](https://doc.paynet.com.tr/oedeme-metotlari/api-entegrasyonu/odeme))
+
 ### 5. Loading States
 
 **Ödeme işlemi sırasında loading state gösterin:**

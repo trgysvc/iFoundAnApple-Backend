@@ -85,6 +85,8 @@ interface PaynetPaymentResponse {
 export class PaynetProvider {
   private readonly logger = new Logger(PaynetProvider.name);
   private readonly config: PaynetConfig;
+  private readonly requestTimeout: number = 30000; // 30 seconds
+  private readonly maxRetries: number = 3; // Maximum retry attempts
 
   constructor(
     private readonly httpService: HttpService,
@@ -114,6 +116,76 @@ export class PaynetProvider {
         'PAYNET publishable key not set. Frontend payment integration may fail.',
       );
     }
+  }
+
+  /**
+   * Check if an error is retryable
+   * Network errors and 5xx server errors are retryable
+   */
+  private isRetryableError(error: any): boolean {
+    // Network errors
+    if (
+      error.code === 'ECONNREFUSED' ||
+      error.code === 'ETIMEDOUT' ||
+      error.code === 'ENOTFOUND' ||
+      error.code === 'ECONNRESET'
+    ) {
+      return true;
+    }
+
+    // 5xx server errors
+    if (error.response?.status >= 500 && error.response?.status < 600) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Execute HTTP request with retry logic and exponential backoff
+   */
+  private async executeWithRetry<T>(
+    requestFn: () => Promise<T>,
+    operationName: string,
+    retries: number = this.maxRetries,
+  ): Promise<T> {
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        return await requestFn();
+      } catch (error: any) {
+        lastError = error;
+
+        const isRetryable = this.isRetryableError(error);
+        const isLastAttempt = attempt === retries;
+
+        if (!isRetryable || isLastAttempt) {
+          // Non-retryable error or last attempt
+          if (!isRetryable) {
+            this.logger.error(
+              `${operationName} failed with non-retryable error: ${error.message}`,
+            );
+          } else {
+            this.logger.error(
+              `${operationName} failed after ${retries} attempts: ${error.message}`,
+            );
+          }
+          throw error;
+        }
+
+        // Exponential backoff: 1s, 2s, 4s
+        const delay = Math.pow(2, attempt - 1) * 1000;
+        this.logger.warn(
+          `${operationName} failed (attempt ${attempt}/${retries}), retrying in ${delay}ms... Error: ${error.message}`,
+        );
+
+        // Wait before retry
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+
+    throw lastError;
   }
 
   /**
@@ -160,17 +232,25 @@ export class PaynetProvider {
       // Debug: Log auth header prefix (first 30 chars) for verification
       this.logger.debug(`Authorization header prefix: Basic ${authHeader.substring(0, 30)}...`);
       
-      const response = await firstValueFrom(
-        this.httpService.post<Paynet3DPaymentResponse>(
-          endpoint,
-          request,
-          {
-            headers: {
-              'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with base64(secret_key:)
-              'Content-Type': 'application/json',
-            },
-          },
-        ),
+      // Execute with retry logic - Paynet supports retrying with same reference_no
+      // According to Paynet docs: if connection timeout occurs, retry with same reference_no
+      // System will return previous successful transaction if exists (code 100)
+      const response = await this.executeWithRetry<{ data: Paynet3DPaymentResponse }>(
+        () =>
+          firstValueFrom(
+            this.httpService.post<Paynet3DPaymentResponse>(
+              endpoint,
+              request,
+              {
+                headers: {
+                  'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with base64(secret_key:)
+                  'Content-Type': 'application/json',
+                },
+                timeout: this.requestTimeout, // 30 seconds timeout
+              },
+            ),
+          ),
+        '3D Payment Initiation',
       );
 
       if (!response.data.success) {
@@ -222,17 +302,22 @@ export class PaynetProvider {
       // PAYNET uses HTTP Basic Authentication with secret_key
       const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
       
-      const response = await firstValueFrom(
-        this.httpService.post<PaynetPaymentResponse>(
-          endpoint,
-          request,
-          {
-            headers: {
-              'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth
-              'Content-Type': 'application/json',
-            },
-          },
-        ),
+      const response = await this.executeWithRetry<{ data: PaynetPaymentResponse }>(
+        () =>
+          firstValueFrom(
+            this.httpService.post<PaynetPaymentResponse>(
+              endpoint,
+              request,
+              {
+                headers: {
+                  'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth
+                  'Content-Type': 'application/json',
+                },
+                timeout: this.requestTimeout, // 30 seconds timeout
+              },
+            ),
+          ),
+        '3D Payment Completion',
       );
 
       if (!response.data.success) {
@@ -315,17 +400,22 @@ export class PaynetProvider {
         requestBody.note = note;
       }
 
-      const response = await firstValueFrom(
-        this.httpService.post<PaynetPaymentResponse>(
-          endpoint,
-          requestBody,
-          {
-            headers: {
-              'Authorization': `Basic ${authHeader}`,
-              'Content-Type': 'application/json',
-            },
-          },
-        ),
+      const response = await this.executeWithRetry<{ data: PaynetPaymentResponse }>(
+        () =>
+          firstValueFrom(
+            this.httpService.post<PaynetPaymentResponse>(
+              endpoint,
+              requestBody,
+              {
+                headers: {
+                  'Authorization': `Basic ${authHeader}`,
+                  'Content-Type': 'application/json',
+                },
+                timeout: this.requestTimeout, // 30 seconds timeout
+              },
+            ),
+          ),
+        'Escrow Release',
       );
 
       if (!response.data.success) {
@@ -382,17 +472,22 @@ export class PaynetProvider {
         requestBody.note = note;
       }
 
-      const response = await firstValueFrom(
-        this.httpService.post<PaynetPaymentResponse>(
-          endpoint,
-          requestBody,
-          {
-            headers: {
-              'Authorization': `Basic ${authHeader}`,
-              'Content-Type': 'application/json',
-            },
-          },
-        ),
+      const response = await this.executeWithRetry<{ data: PaynetPaymentResponse }>(
+        () =>
+          firstValueFrom(
+            this.httpService.post<PaynetPaymentResponse>(
+              endpoint,
+              requestBody,
+              {
+                headers: {
+                  'Authorization': `Basic ${authHeader}`,
+                  'Content-Type': 'application/json',
+                },
+                timeout: this.requestTimeout, // 30 seconds timeout
+              },
+            ),
+          ),
+        'Escrow Rejection',
       );
 
       if (!response.data.success) {
@@ -431,15 +526,17 @@ export class PaynetProvider {
       // PAYNET uses HTTP Basic Authentication with secret_key
       const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
       
-      const response = await firstValueFrom(
-        this.httpService.get(
-          endpoint,
-          {
-            headers: {
-              'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth
-            },
-          },
-        ),
+      const response = await this.executeWithRetry<{ data: any }>(
+        () =>
+          firstValueFrom(
+            this.httpService.get(endpoint, {
+              headers: {
+                'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth
+              },
+              timeout: this.requestTimeout, // 30 seconds timeout
+            }),
+          ),
+        'Payment Status Check',
       );
 
       return response.data;

@@ -396,7 +396,7 @@ export class PaymentsService {
     }
 
     // Check if webhook has been received
-    const webhookReceived = this.webhooksService.hasWebhook(paymentId);
+    const webhookReceived = await this.webhooksService.hasWebhook(paymentId);
 
     return {
       id: payment.id,
@@ -423,7 +423,7 @@ export class PaymentsService {
   }> {
     this.logger.log(`Getting webhook data: paymentId=${paymentId}, userId=${userId}`);
 
-    const webhookData = this.webhooksService.getWebhookData(paymentId);
+    const webhookData = await this.webhooksService.getWebhookData(paymentId);
 
     if (!webhookData) {
       return {

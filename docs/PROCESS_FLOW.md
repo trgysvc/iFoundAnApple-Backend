@@ -704,12 +704,105 @@ SET
   failed_at = now(),
   updated_at = now()
 WHERE id = [payment_id];
+
+-- Backend, device status'u payment_pending'e döndürür (kullanıcı tekrar ödeme yapabilir):
+UPDATE devices 
+SET 
+  status = 'payment_pending',
+  updated_at = now()
+WHERE id = [device_id];
 ```
 
 **Kullanıcı Deneyimi (Başarısız Ödeme):**
 - Hata mesajı gösterilir: "Ödeme başarısız oldu. Lütfen tekrar deneyin."
 - "Tekrar Dene" butonu ile ödeme sayfasına geri dönülür
 - Kullanıcı kart bilgilerini tekrar girebilir
+- Device status `payment_pending` olduğu için tekrar ödeme yapılabilir
+
+---
+
+## 🛡️ Ödeme Sürecindeki Aksaklıklar ve Alınan Önlemler
+
+Paynet dokümantasyonuna göre (https://doc.paynet.com.tr) uygulanan önlemler:
+
+### 1. Paynet ile İletişim Kesilirse
+
+**Paynet Dokümantasyon Desteği:**
+> "Eğer bağlantı zaman aşımı veya işlem zaman aşımı gibi sebeplerden dolayı yanıt alamıyorsanız, aynı `reference_no` ile yanıt alana kadar işlemi tekrarlayabilirsiniz. Sistem, aynı `reference_no` ile daha önce başarılı bir işlem varsa, o işlemi döndürür." ([doc.paynet.com.tr](https://doc.paynet.com.tr/oedeme-metotlari/api-entegrasyonu/odeme))
+
+**Backend Önlemleri:**
+- ✅ **Retry Mekanizması:** Exponential backoff ile 3 deneme (1s, 2s, 4s gecikme)
+- ✅ **Timeout Ayarı:** 30 saniye timeout ile uzun süren istekler kesilir
+- ✅ **Idempotency:** Aynı `reference_no` kullanılarak duplicate ödeme önlenir
+- ✅ Payment kaydı `pending` durumunda kalır, kullanıcı tekrar deneyebilir
+
+**Kod Lokasyonu:** `src/payments/providers/paynet.provider.ts` - `executeWithRetry()` metodu
+
+### 2. Ödeme İşlemi Olumsuz Sonuçlanırsa
+
+**Backend Önlemleri:**
+- ✅ Webhook'ta `is_succeed: false` geldiğinde otomatik işleme alınır
+- ✅ Payment status `failed` olarak güncellenir
+- ✅ **Device status `payment_pending`'e döner** (kullanıcı tekrar ödeme yapabilir)
+- ✅ Kullanıcıya bildirim gönderilir
+- ✅ Audit log kaydı oluşturulur
+
+**Kod Lokasyonu:** `src/webhooks/webhooks.service.ts` - `processFailedPayment()` metodu
+
+### 3. Paynet Tarafında Aksaklık Sonucu Webhook Gelmezse
+
+**Paynet Dokümantasyon Desteği:**
+> "İşlem sonucunun başarılı olup olmadığını `is_succeed` parametresini kontrol ederek anlayabilirsiniz." ([doc.paynet.com.tr](https://doc.paynet.com.tr/oedeme-metotlari/api-entegrasyonu/odeme))
+
+**Backend Önlemleri:**
+
+**A) Otomatik Payment Reconciliation:**
+- ✅ Cron job: Her 5 dakikada bir çalışır
+- ✅ 5 dakikadan eski pending payment'lar kontrol edilir
+- ✅ Webhook gelmemiş payment'lar için audit log oluşturulur
+- ✅ 10 dakikadan eski payment'lar için manuel inceleme gerektiği işaretlenir
+
+**B) Webhook Storage:**
+- ✅ Tüm webhook payload'ları `webhook_storage` tablosunda saklanır
+- ✅ Idempotency kontrolü için `reference_no` unique index ile korunur
+- ✅ Retry count ve last_retry_at ile retry mekanizması yönetilir
+
+**C) Webhook Retry:**
+- ✅ Cron job: Her 1 saatte bir çalışır
+- ✅ İşlenmemiş webhook'lar (retry_count < 5) tekrar denenir
+- ✅ Maksimum 5 retry denemesi yapılır
+
+**D) Frontend/iOS Polling:**
+- ✅ 30 deneme, 10 saniye aralık (toplam 5 dakika)
+- ✅ Webhook geldiğinde backend normal akışı devam ettirir
+
+**Kod Lokasyonu:**
+- `src/payments/services/payment-reconciliation.service.ts` - `reconcilePendingPayments()`, `retryFailedWebhooks()`
+- `docs/sql_migrations/webhook_storage_table.sql` - Webhook storage tablosu
+
+### 4. Webhook İşleme Başarısız Olursa
+
+**Backend Önlemleri:**
+- ✅ Webhook `webhook_storage` tablosuna kaydedilir
+- ✅ Retry mekanizması ile otomatik tekrar deneme (maksimum 5 deneme)
+- ✅ Hata mesajı ve retry count kaydedilir
+- ✅ Her 1 saatte bir başarısız webhook'lar tekrar denenir
+
+### Özet: Uygulanan Önlemler
+
+| Aksaklık Senaryosu | Paynet Desteği | Backend Önlemi | Durum |
+|-------------------|----------------|----------------|-------|
+| Paynet ile iletişim kesilirse | ✅ Destekleniyor | Exponential backoff retry (3 deneme) + timeout | ✅ Uygulandı |
+| Ödeme başarısız olursa | ✅ Destekleniyor (is_succeed: false) | Device status geri alınır, bildirim gönderilir | ✅ Uygulandı |
+| Webhook gelmezse | ✅ Destekleniyor (status query) | Otomatik reconciliation + webhook storage | ✅ Uygulandı |
+| Webhook işleme başarısız olursa | ✅ Destekleniyor (webhook retry) | Retry mekanizması + webhook storage | ✅ Uygulandı |
+
+**Paynet Dokümantasyon Referansları:**
+- [Ödeme API Entegrasyonu](https://doc.paynet.com.tr/oedeme-metotlari/api-entegrasyonu/odeme)
+- [HTTP Status Kodları](https://doc.paynet.com.tr/uornek/genel-bilgiler/hata-kodlari/http-status-kodlar)
+- [İşlem Listesi Servisi](https://doc.paynet.com.tr/servisler/islem/islem-listesi)
+
+---
 
 **Database Kayıtları (Ödeme Tamamlandıktan Sonra):**
 

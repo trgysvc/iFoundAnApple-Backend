@@ -14,9 +14,8 @@ export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
   private readonly supabase: SupabaseClient;
   private readonly processedWebhooks = new Set<string>();
-  // In-memory storage for webhook payloads (frontend/iOS can retrieve via GET endpoint)
-  // In production, consider using Redis or a database table for persistence
-  private readonly webhookStorage = new Map<string, StoredWebhook>();
+  // In-memory cache for frequently accessed webhooks (complements database storage)
+  private readonly webhookCache = new Map<string, StoredWebhook>();
 
   constructor(
     private readonly supabaseService: SupabaseService,
@@ -80,23 +79,81 @@ export class WebhooksService {
       throw new BadRequestException('Missing reference_no in webhook payload');
     }
 
-    // Check idempotency using reference_no
-    if (this.processedWebhooks.has(referenceNo)) {
-      this.logger.warn(`Duplicate webhook detected: reference_no=${referenceNo}`);
-      return;
-    }
-
-    this.processedWebhooks.add(referenceNo);
-
     // PAYNET uses is_succeed to indicate payment success
     const isSucceed = payload.is_succeed === true || payload.is_succeed === 'true';
-    
-    // Store webhook payload in memory for retrieval
-    this.webhookStorage.set(referenceNo, {
+
+    // Check idempotency using database (webhook_storage table)
+    const { data: existingWebhook } = await this.supabase
+      .from('webhook_storage')
+      .select('id, processed_at')
+      .eq('reference_no', referenceNo)
+      .maybeSingle();
+
+    if (existingWebhook?.processed_at) {
+      this.logger.warn(
+        `Duplicate webhook detected (already processed): reference_no=${referenceNo}`,
+      );
+      return; // Webhook already processed
+    }
+
+    // Store webhook in database for idempotency and retry mechanism
+    const webhookRecord = {
+      payment_id: referenceNo, // payment_id is same as reference_no in our system
+      reference_no: referenceNo,
+      webhook_payload: payload,
+      is_succeed: isSucceed,
+      received_at: new Date().toISOString(),
+      signature: signature || null,
+      provider: 'paynet',
+      processed_at: null, // Will be set when processing is complete
+      retry_count: 0,
+    };
+
+    // Insert or update webhook record
+    if (existingWebhook) {
+      // Update existing unprocessed webhook
+      const { error: updateError } = await this.supabase
+        .from('webhook_storage')
+        .update({
+          webhook_payload: payload,
+          is_succeed: isSucceed,
+          received_at: new Date().toISOString(),
+          signature: signature || null,
+          retry_count: 0, // Reset retry count for new webhook
+        })
+        .eq('reference_no', referenceNo);
+
+      if (updateError) {
+        this.logger.error(
+          `Failed to update webhook storage: ${updateError.message}`,
+          updateError,
+        );
+        // Continue processing even if storage fails
+      }
+    } else {
+      // Insert new webhook record
+      const { error: insertError } = await this.supabase
+        .from('webhook_storage')
+        .insert(webhookRecord);
+
+      if (insertError) {
+        this.logger.error(
+          `Failed to store webhook: ${insertError.message}`,
+          insertError,
+        );
+        // Continue processing even if storage fails
+      }
+    }
+
+    // Store in memory cache for quick retrieval
+    this.webhookCache.set(referenceNo, {
       payload,
       receivedAt: new Date().toISOString(),
       isSucceed,
     });
+
+    // Mark as processed in memory (for quick duplicate check)
+    this.processedWebhooks.add(referenceNo);
 
     // Find payment record by reference_no (which is the payment ID)
     const { data: payment, error: paymentError } = await this.supabase
@@ -111,12 +168,48 @@ export class WebhooksService {
       return;
     }
 
-    if (isSucceed) {
-      // Payment successful - create all database records
-      await this.processSuccessfulPayment(payment, payload);
-    } else {
-      // Payment failed - update payment status
-      await this.processFailedPayment(payment, payload);
+    try {
+      if (isSucceed) {
+        // Payment successful - create all database records
+        await this.processSuccessfulPayment(payment, payload, referenceNo);
+      } else {
+        // Payment failed - update payment status
+        await this.processFailedPayment(payment, payload, referenceNo);
+      }
+
+      // Mark webhook as processed
+      await this.supabase
+        .from('webhook_storage')
+        .update({
+          processed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('reference_no', referenceNo);
+    } catch (error: any) {
+      // Webhook processing failed - will be retried later
+      this.logger.error(
+        `Error processing webhook ${referenceNo}: ${error.message}`,
+        error.stack,
+      );
+
+      // Update retry count - get current count first, then increment
+      const { data: currentWebhook } = await this.supabase
+        .from('webhook_storage')
+        .select('retry_count')
+        .eq('reference_no', referenceNo)
+        .single();
+
+      await this.supabase
+        .from('webhook_storage')
+        .update({
+          retry_count: (currentWebhook?.retry_count || 0) + 1,
+          last_retry_at: new Date().toISOString(),
+          error_message: error.message,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('reference_no', referenceNo);
+
+      throw error; // Re-throw to let caller know processing failed
     }
   }
 
@@ -124,7 +217,11 @@ export class WebhooksService {
    * Process successful payment webhook
    * Creates all required database records
    */
-  private async processSuccessfulPayment(payment: any, webhookPayload: any): Promise<void> {
+  private async processSuccessfulPayment(
+    payment: any,
+    webhookPayload: any,
+    referenceNo: string,
+  ): Promise<void> {
     const paymentId = payment.id;
     this.logger.log(`Processing successful payment: ${paymentId}`);
 
@@ -258,29 +355,99 @@ export class WebhooksService {
 
   /**
    * Process failed payment webhook
-   * Updates payment status to 'failed'
+   * Updates payment status to 'failed' and resets device status
    */
-  private async processFailedPayment(payment: any, webhookPayload: any): Promise<void> {
+  private async processFailedPayment(
+    payment: any,
+    webhookPayload: any,
+    referenceNo: string,
+  ): Promise<void> {
     const paymentId = payment.id;
     this.logger.log(`Processing failed payment: ${paymentId}`);
 
     try {
-      // Update payments table with failed status
+      // 1. Update payments table with failed status
       const { error: updateError } = await this.supabase
         .from('payments')
         .update({
           payment_status: 'failed',
           failure_reason: webhookPayload.error_message || 'Payment failed',
+          failed_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
         .eq('id', paymentId);
 
       if (updateError) {
-        this.logger.error(`Failed to update payment status: ${updateError.message}`, updateError);
+        this.logger.error(
+          `Failed to update payment status: ${updateError.message}`,
+          updateError,
+        );
         throw updateError;
       }
 
-      this.logger.log(`Successfully updated failed payment: ${paymentId}`);
+      // 2. Reset device status to 'payment_pending' so user can retry payment
+      const { error: deviceError } = await this.supabase
+        .from('devices')
+        .update({
+          status: 'payment_pending', // Allow user to retry payment
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', payment.device_id);
+
+      if (deviceError) {
+        this.logger.error(
+          `Failed to reset device status: ${deviceError.message}`,
+          deviceError,
+        );
+        // Don't throw - payment update succeeded, device status is less critical
+      }
+
+      // 3. Create notification for payer
+      const { error: notifError } = await this.supabase.from('notifications').insert({
+        user_id: payment.payer_id,
+        message_key: 'payment_failed',
+        type: 'error',
+        is_read: false,
+        metadata: {
+          payment_id: paymentId,
+          failure_reason: webhookPayload.error_message || 'Payment failed',
+        },
+      });
+
+      if (notifError) {
+        this.logger.error(
+          `Failed to create notification: ${notifError.message}`,
+          notifError,
+        );
+        // Don't throw - notifications are not critical
+      }
+
+      // 4. Create audit log
+      const { error: auditError } = await this.supabase.from('audit_logs').insert({
+        event_type: 'payment_failed',
+        event_category: 'payment',
+        event_action: 'fail',
+        event_severity: 'warning',
+        user_id: payment.payer_id,
+        resource_type: 'payment',
+        resource_id: paymentId,
+        event_description: `Payment failed: ${webhookPayload.error_message || 'Payment failed'}`,
+        event_data: {
+          payment_id: paymentId,
+          reference_no: referenceNo,
+          failure_reason: webhookPayload.error_message,
+        },
+      });
+
+      if (auditError) {
+        this.logger.error(
+          `Failed to create audit log: ${auditError.message}`,
+          auditError,
+        );
+        // Don't throw - audit logs are not critical
+      }
+
+      this.logger.log(`Successfully processed failed payment: ${paymentId}`);
     } catch (error: any) {
       this.logger.error(`Error processing failed payment: ${error.message}`, error.stack);
       throw error;
@@ -291,15 +458,51 @@ export class WebhooksService {
    * Get stored webhook data for a payment
    * Frontend/iOS calls this after detecting webhookReceived: true in status endpoint
    */
-  getWebhookData(paymentId: string): StoredWebhook | null {
-    return this.webhookStorage.get(paymentId) || null;
+  async getWebhookData(paymentId: string): Promise<StoredWebhook | null> {
+    // Check cache first
+    if (this.webhookCache.has(paymentId)) {
+      return this.webhookCache.get(paymentId) || null;
+    }
+
+    // Query database
+    const { data: webhook } = await this.supabase
+      .from('webhook_storage')
+      .select('webhook_payload, received_at, is_succeed')
+      .eq('reference_no', paymentId)
+      .maybeSingle();
+
+    if (!webhook) {
+      return null;
+    }
+
+    const storedWebhook: StoredWebhook = {
+      payload: webhook.webhook_payload,
+      receivedAt: webhook.received_at,
+      isSucceed: webhook.is_succeed,
+    };
+
+    // Cache for future requests
+    this.webhookCache.set(paymentId, storedWebhook);
+    return storedWebhook;
   }
 
   /**
    * Check if webhook has been received for a payment
    */
-  hasWebhook(paymentId: string): boolean {
-    return this.webhookStorage.has(paymentId);
+  async hasWebhook(paymentId: string): Promise<boolean> {
+    // Check cache first
+    if (this.webhookCache.has(paymentId)) {
+      return true;
+    }
+
+    // Query database
+    const { data: webhook } = await this.supabase
+      .from('webhook_storage')
+      .select('id')
+      .eq('reference_no', paymentId)
+      .maybeSingle();
+
+    return webhook !== null;
   }
 
 }
