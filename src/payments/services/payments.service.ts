@@ -4,10 +4,12 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseService } from '../../supabase/supabase.service';
 import { FeeValidationService } from './fee-validation.service';
 import { PaynetProvider } from '../providers/paynet.provider';
+import { WebhooksService } from '../../webhooks/webhooks.service';
 import { ProcessPaymentDto } from '../dto/process-payment.dto';
 import { PaymentResponseDto } from '../dto/payment-response.dto';
 import { Complete3DPaymentDto } from '../dto/complete-3d-payment.dto';
@@ -29,16 +31,24 @@ export class PaymentsService {
     private readonly supabaseService: SupabaseService,
     private readonly feeValidationService: FeeValidationService,
     private readonly paynetProvider: PaynetProvider,
+    private readonly webhooksService: WebhooksService,
   ) {
     this.supabase = this.supabaseService.getClient();
   }
 
   /**
    * Process payment request
-   * 1. Validate fees against database
-   * 2. Get device and finder information
-   * 3. Initiate PAYNET payment
-   * 4. Create payment and escrow records
+   * Backend creates payment record in database with 'pending' status
+   * Frontend/iOS receives payment URL and initiates 3D Secure
+   * 
+   * 1. Validate device exists and belongs to user
+   * 2. Validate device status is 'payment_pending'
+   * 3. Validate amount (security check - never trust frontend)
+   * 4. Find matched finder user_id
+   * 5. Generate payment ID (UUID)
+   * 6. Create payment record in database with 'pending' status
+   * 7. Initiate PAYNET 3D Secure payment
+   * 8. Return payment info
    */
   async processPayment(
     dto: ProcessPaymentDto,
@@ -46,79 +56,96 @@ export class PaymentsService {
   ): Promise<PaymentResponseDto> {
     this.logger.log(`Processing payment for device ${dto.deviceId} by user ${payerUserId}`);
 
-    const fees = await this.feeValidationService.validateAmount(
-      dto.deviceId,
-      dto.totalAmount,
-    );
-
+    // 1. Get device info for validation
     const device = await this.getDevice(dto.deviceId);
 
+    // 2. Validate device ownership
     if (device.userId !== payerUserId) {
-      throw new BadRequestException('Device does not belong to the payer');
+      this.logger.warn(
+        `User ${payerUserId} attempted to process payment for device ${dto.deviceId} that belongs to ${device.userId}`,
+      );
+      throw new BadRequestException(
+        `User ${payerUserId} is not the owner of device ${dto.deviceId}`,
+      );
     }
 
-    // After matching, owner device status becomes 'payment_pending' to allow payment
-    // Process: matched → payment_pending → (payment) → payment_completed
+    // 3. Validate device status
     if (
       device.status !== 'payment_pending' &&
       device.status !== 'PAYMENT_PENDING'
     ) {
       throw new BadRequestException(
-        `Device must be in 'payment_pending' status to proceed with payment. Current status: ${device.status}. Please complete matching first.`,
+        `Device ${dto.deviceId} is not in 'payment_pending' status. Current status: ${device.status}`,
       );
     }
 
-    // Get matched finder from payments table if payment already exists, 
-    // or from device matching logic (to be implemented in frontend/match service)
-    // For now, receiver_id will be set when payment is created
-    // TODO: Implement proper matching logic to get receiver_id (finder's user_id)
-    // This might require querying for matched device or using a matching table
-    const receiverId = await this.getMatchedReceiverId(device.id);
-    
-    if (!receiverId) {
-      throw new BadRequestException('Device has no matched finder. Please complete matching first.');
-    }
-
-    const paymentId = await this.createPaymentRecords(
-      device,
-      fees,
-      payerUserId,
-      receiverId,
+    // 4. Validate amount (security check - never trust frontend)
+    // Frontend might have sent wrong amount, so we validate against database
+    const calculatedFees = await this.feeValidationService.validateAmount(
+      dto.deviceId,
+      dto.totalAmount,
     );
 
-    // Initiate 3D Secure payment with PAYNET
-    // is_escrow: true - Ödeme PAYNET tarafında da tutulur (ana firma onayına tabi)
-    // Backend'deki escrow yönetimi ile birlikte çalışır
-    // 
-    // PAYNET API format:
-    // - Endpoint: POST /v2/transaction/tds_initial
-    // - Field names: snake_case (reference_no, return_url, domain, etc.)
-    // - Card details should come from frontend, not stored in backend
+    // 5. Find matched finder user_id
+    const finderUserId = await this.getMatchedFinderUserId(dto.deviceId);
+    if (!finderUserId) {
+      throw new BadRequestException(
+        `No matched finder found for device ${dto.deviceId}`,
+      );
+    }
+
+    // 6. Generate payment ID (UUID) - this will be used as reference_no in Paynet
+    const paymentId = randomUUID();
+
+    // 7. Create payment record in database with 'pending' status
+    const { error: paymentError } = await this.supabase.from('payments').insert({
+      id: paymentId,
+      device_id: dto.deviceId,
+      payer_id: payerUserId,
+      receiver_id: finderUserId,
+      total_amount: dto.totalAmount,
+      reward_amount: dto.feeBreakdown.rewardAmount,
+      cargo_fee: dto.feeBreakdown.cargoFee,
+      payment_gateway_fee: dto.feeBreakdown.gatewayFee,
+      service_fee: dto.feeBreakdown.serviceFee,
+      net_payout: dto.feeBreakdown.netPayout,
+      payment_provider: 'paynet',
+      payment_status: 'pending',
+      escrow_status: 'pending',
+      currency: 'TRY',
+    });
+
+    if (paymentError) {
+      this.logger.error(`Failed to create payment record: ${paymentError.message}`, paymentError);
+      throw new BadRequestException('Failed to create payment record');
+    }
+
+    this.logger.log(`Payment record created: ${paymentId} with status 'pending'`);
+
+    // 8. Initiate 3D Secure payment with PAYNET
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000';
     
     const paynetResponse = await this.paynetProvider.initiate3DPayment({
-      amount: fees.totalAmount,
-      reference_no: paymentId, // PAYNET uses reference_no instead of order_id
-      return_url: `${frontendUrl}/payment/callback`, // 3D doğrulama sonucunun post edileceği URL
-      domain: new URL(backendUrl).hostname, // Domain bilgisi (hostname only)
-      is_escrow: true, // PAYNET escrow özelliği aktif - ödeme tutulur
+      amount: dto.totalAmount,
+      reference_no: paymentId, // Use generated payment ID as reference_no
+      return_url: `${frontendUrl}/payment/callback`,
+      domain: new URL(backendUrl).hostname,
+      is_escrow: true,
       description: `Payment for device ${device.model}`,
-      // Note: Card details (pan, card_holder, month, year, cvc) should come from frontend
-      // Frontend will handle card input and send to PAYNET directly or via backend
     });
 
-    await this.updatePaymentWithProviderInfo(paymentId, paynetResponse);
-
+    // 9. Return payment info
     return {
       id: paymentId,
       deviceId: dto.deviceId,
       paymentStatus: 'pending',
       escrowStatus: 'pending',
-      totalAmount: fees.totalAmount,
+      totalAmount: dto.totalAmount,
       providerTransactionId: paynetResponse.transaction_id,
       publishableKey: this.paynetProvider.getPublishableKey(),
-      paymentUrl: paynetResponse.post_url || paynetResponse.html_content, // 3D verification URL
+      paymentUrl: paynetResponse.post_url || paynetResponse.html_content,
+      feeBreakdown: dto.feeBreakdown,
     };
   }
 
@@ -139,27 +166,11 @@ export class PaymentsService {
   }
 
   /**
-   * Get matched receiver ID (finder's user_id) for a device
-   * Uses existing tables:
-   * 1. First check payments table (if payment already exists)
-   * 2. Then find matched device with same serialNumber and model
-   * 3. Alternative: Check audit_logs for device_matching event
+   * Get matched finder user_id for a device (owner's device)
+   * Finds the matched finder device with same serialNumber and model
    */
-  private async getMatchedReceiverId(deviceId: string): Promise<string | null> {
-    // Option 1: Check if payment already exists with receiver_id
-    const { data: existingPayment, error: paymentError } = await this.supabase
-      .from('payments')
-      .select('receiver_id')
-      .eq('device_id', deviceId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!paymentError && existingPayment?.receiver_id) {
-      return existingPayment.receiver_id;
-    }
-
-    // Option 2: Get current device info
+  private async getMatchedFinderUserId(deviceId: string): Promise<string | null> {
+    // Get current device info
     const { data: currentDevice, error: deviceError } = await this.supabase
       .from('devices')
       .select('id, userId, model, serialNumber, status, device_role')
@@ -171,14 +182,8 @@ export class PaymentsService {
       return null;
     }
 
-    // Option 3: Find matched device with same serialNumber and model
-    // The matched device should have:
-    // - Same serialNumber and model
-    // - Different userId (not the same user)
-    // - Different device_role (if current is 'owner', finder should be 'finder' and vice versa)
-    // Note: Only owner device needs to be 'matched' status for payment.
-    // Finder device can have any status (REPORTED, matched, etc.) - we just need to find it.
-    const currentUserRole = (currentDevice as any).device_role || 'owner'; // Default to owner if null
+    // Find matched device with same serialNumber and model
+    const currentUserRole = (currentDevice as any).device_role || 'owner';
     const expectedMatchedRole = currentUserRole === 'owner' ? 'finder' : 'owner';
 
     const { data: matchedDevice, error: matchedError } = await this.supabase
@@ -186,8 +191,8 @@ export class PaymentsService {
       .select('id, userId, device_role')
       .eq('serialNumber', currentDevice.serialNumber)
       .eq('model', currentDevice.model)
-      .neq('userId', currentDevice.userId) // Different user
-      .eq('device_role', expectedMatchedRole) // Opposite role (owner ↔ finder)
+      .neq('userId', currentDevice.userId)
+      .eq('device_role', expectedMatchedRole)
       .maybeSingle();
 
     if (!matchedError && matchedDevice?.userId) {
@@ -197,8 +202,7 @@ export class PaymentsService {
       return matchedDevice.userId;
     }
 
-    // Option 4: Check audit_logs as fallback
-    // Look for device_matching event with this device_id
+    // Check audit_logs as fallback
     const { data: auditLog, error: auditError } = await this.supabase
       .from('audit_logs')
       .select('event_data')
@@ -216,7 +220,6 @@ export class PaymentsService {
         return eventData.finder_user_id;
       }
       if (eventData.finderDeviceId) {
-        // If finderDeviceId is available, get its userId
         const { data: finderDevice, error: finderDeviceError } = await this.supabase
           .from('devices')
           .select('userId')
@@ -230,11 +233,18 @@ export class PaymentsService {
     }
 
     this.logger.warn(
-      `No receiver_id found for device ${deviceId}. Device is in matched status but no finder found.`,
+      `No finder found for device ${deviceId}. Device is in matched status but no finder found.`,
     );
     return null;
   }
 
+  /**
+   * Create payment and escrow records
+   * NOTE: This method is no longer used in Senaryo B
+   * Frontend creates these records before calling backend
+   * Kept for reference or future use
+   */
+  /*
   private async createPaymentRecords(
     device: DeviceInfo,
     fees: any,
@@ -289,22 +299,23 @@ export class PaymentsService {
       throw new BadRequestException('Failed to create escrow record');
     }
 
-    // Device status is already 'payment_pending' at this point (set during matching phase)
-    // After payment is initiated, status will be updated to 'payment_completed' by webhook
-    // No need to update device status here as it's already in payment_pending state
     this.logger.log(`Payment initiated for device ${device.id} with status: ${device.status}`);
 
     return paymentId;
   }
+  */
 
   /**
    * Complete 3D Secure payment after user verification
    * Called after user completes 3D Secure verification on bank's page
    * 
+   * Backend does NOT write to database, only communicates with Paynet API
+   * Frontend/iOS will create payment records when webhook arrives
+   * 
    * Security: This endpoint validates that:
-   * 1. Payment exists and belongs to the user
-   * 2. Payment is in 'pending' status
-   * 3. Session ID and Token ID are valid
+   * 1. Session ID and Token ID are provided
+   * 2. Payment ID is valid UUID format
+   * 3. Paynet API accepts the completion request
    */
   async complete3DPayment(
     dto: Complete3DPaymentDto,
@@ -314,59 +325,15 @@ export class PaymentsService {
       `Completing 3D payment: paymentId=${dto.paymentId}, userId=${userId}`,
     );
 
-    // Get payment and verify ownership
-    const { data: payment, error: paymentError } = await this.supabase
-      .from('payments')
-      .select('id, payer_id, payment_status, provider_transaction_id')
-      .eq('id', dto.paymentId)
-      .single();
-
-    if (paymentError || !payment) {
-      this.logger.error(
-        `Payment not found: ${dto.paymentId}`,
-        paymentError,
-      );
-      throw new NotFoundException(`Payment not found: ${dto.paymentId}`);
-    }
-
-    // Security: Verify payment belongs to the user
-    if (payment.payer_id !== userId) {
-      this.logger.warn(
-        `User ${userId} attempted to complete payment ${dto.paymentId} that belongs to ${payment.payer_id}`,
-      );
-      throw new BadRequestException('Payment does not belong to the user');
-    }
-
-    // Verify payment is in pending status
-    if (payment.payment_status !== 'pending') {
-      this.logger.warn(
-        `Payment ${dto.paymentId} is not in pending status. Current status: ${payment.payment_status}`,
-      );
-      throw new BadRequestException(
-        `Payment is not in pending status. Current status: ${payment.payment_status}`,
-      );
-    }
-
     // Complete 3D payment with PAYNET
+    // Backend does NOT validate payment ownership or status from database
+    // Payment records don't exist yet - they will be created by frontend/iOS when webhook arrives
     try {
       const paynetResponse = await this.paynetProvider.complete3DPayment({
         session_id: dto.sessionId,
         token_id: dto.tokenId,
         transaction_type: 1, // 1 = Satış (Sale)
       });
-
-      // Update payment with PAYNET response
-      // Note: Final payment status will be updated by webhook
-      // But we can update transaction_id if available
-      if (paynetResponse.transaction_id) {
-        await this.supabase
-          .from('payments')
-          .update({
-            provider_transaction_id: paynetResponse.transaction_id,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', dto.paymentId);
-      }
 
       this.logger.log(
         `3D payment completion initiated: paymentId=${dto.paymentId}, transactionId=${paynetResponse.transaction_id}`,
@@ -383,49 +350,281 @@ export class PaymentsService {
         error.stack,
       );
 
-      // Update payment status to failed if PAYNET returns error
-      await this.supabase
-        .from('payments')
-        .update({
-          payment_status: 'failed',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', dto.paymentId);
-
+      // Backend does NOT update database - frontend/iOS will handle error state
       throw new BadRequestException(
         `Payment completion failed: ${error.message}`,
       );
     }
   }
 
-  private async updatePaymentWithProviderInfo(
+  /**
+   * Get payment status from database
+   * Reads payment record from database and returns status information
+   */
+  async getPaymentStatus(
     paymentId: string,
-    paynetResponse: any,
-  ): Promise<void> {
-    // payments table schema: provider_transaction_id exists, provider_session_id doesn't
-    // Store session_id in provider_response JSONB or ignore if not critical
-    const updateData: any = {
-      provider_transaction_id: paynetResponse.transaction_id || paynetResponse.transactionId,
-      updated_at: new Date().toISOString(),
-    };
+    userId: string,
+  ): Promise<{
+    id: string;
+    deviceId: string;
+    paymentStatus: string;
+    escrowStatus: string;
+    webhookReceived: boolean;
+    totalAmount: number;
+    providerTransactionId?: string;
+  }> {
+    this.logger.log(`Getting payment status: paymentId=${paymentId}, userId=${userId}`);
 
-    // Store additional provider info in provider_response if needed
-    if (paynetResponse.session_id) {
-      // provider_response is text, could be JSON string
-      // For now, we'll just store transaction_id which is the main field
-      this.logger.debug(`PAYNET session_id received but not stored: ${paynetResponse.session_id}`);
+    // Read payment record from database
+    const { data: payment, error: paymentError } = await this.supabase
+      .from('payments')
+      .select('*')
+      .eq('id', paymentId)
+      .single();
+
+    if (paymentError || !payment) {
+      this.logger.error(`Payment not found: ${paymentId}`, paymentError);
+      throw new NotFoundException(`Payment not found: ${paymentId}`);
     }
 
-    const { error } = await this.supabase
-      .from('payments')
-      .update(updateData)
-      .eq('id', paymentId);
-
-    if (error) {
+    // Validate payment ownership (user must be payer or receiver)
+    if (payment.payer_id !== userId && payment.receiver_id !== userId) {
       this.logger.warn(
-        `Failed to update payment with provider info: ${error.message}`,
+        `User ${userId} attempted to access payment ${paymentId} that doesn't belong to them`,
+      );
+      throw new BadRequestException('Payment does not belong to this user');
+    }
+
+    // Check if webhook has been received
+    const webhookReceived = this.webhooksService.hasWebhook(paymentId);
+
+    return {
+      id: payment.id,
+      deviceId: payment.device_id,
+      paymentStatus: payment.payment_status || 'pending',
+      escrowStatus: payment.escrow_status || 'pending',
+      webhookReceived,
+      totalAmount: Number(payment.total_amount) || 0,
+      providerTransactionId: payment.provider_transaction_id || payment.provider_payment_id,
+    };
+  }
+
+  /**
+   * Get webhook data for a payment
+   * Frontend/iOS calls this after detecting webhookReceived: true
+   */
+  async getWebhookData(
+    paymentId: string,
+    userId: string,
+  ): Promise<{
+    success: boolean;
+    webhookData?: any;
+    error?: string;
+  }> {
+    this.logger.log(`Getting webhook data: paymentId=${paymentId}, userId=${userId}`);
+
+    const webhookData = this.webhooksService.getWebhookData(paymentId);
+
+    if (!webhookData) {
+      return {
+        success: false,
+        error: 'Webhook data not found for this payment',
+      };
+    }
+
+    return {
+      success: true,
+      webhookData: webhookData.payload,
+    };
+  }
+
+  /**
+   * Release escrow payment
+   * Backend communicates with Paynet API and updates database after successful release
+   */
+  async releaseEscrow(
+    paymentId: string,
+    deviceId: string,
+    releaseReason: string,
+    userId: string,
+  ): Promise<{ success: boolean; message: string }> {
+    this.logger.log(
+      `Releasing escrow: paymentId=${paymentId}, deviceId=${deviceId}, userId=${userId}`,
+    );
+
+    // Get payment record from database
+    const { data: payment, error: paymentError } = await this.supabase
+      .from('payments')
+      .select('*')
+      .eq('id', paymentId)
+      .single();
+
+    if (paymentError || !payment) {
+      throw new NotFoundException(`Payment not found: ${paymentId}`);
+    }
+
+    // Validate payment ownership
+    if (payment.payer_id !== userId && payment.receiver_id !== userId) {
+      throw new BadRequestException('Payment does not belong to this user');
+    }
+
+    // Validate payment status
+    if (payment.payment_status !== 'completed' || payment.escrow_status !== 'held') {
+      throw new BadRequestException(
+        `Payment is not in valid state for escrow release. Status: ${payment.payment_status}, Escrow: ${payment.escrow_status}`,
+      );
+    }
+
+    // Get Paynet transaction ID from payment record
+    const paynetTransactionId =
+      payment.provider_transaction_id || payment.provider_payment_id || paymentId;
+
+    // Release escrow via Paynet API
+    try {
+      await this.paynetProvider.releaseEscrowPayment(paynetTransactionId, releaseReason);
+
+      this.logger.log(`Escrow released successfully via Paynet: paymentId=${paymentId}`);
+
+      // Update database after successful Paynet API call
+      await this.updateDatabaseAfterEscrowRelease(payment, deviceId, releaseReason, userId);
+
+      return {
+        success: true,
+        message: 'Escrow released successfully',
+      };
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to release escrow: ${error.message}`,
+        error.stack,
+      );
+
+      throw new BadRequestException(
+        `Escrow release failed: ${error.message}`,
       );
     }
   }
+
+  /**
+   * Update database after successful escrow release
+   */
+  private async updateDatabaseAfterEscrowRelease(
+    payment: any,
+    deviceId: string,
+    releaseReason: string,
+    userId: string,
+  ): Promise<void> {
+    try {
+      // 1. Update escrow_accounts table
+      const { error: escrowError } = await this.supabase
+        .from('escrow_accounts')
+        .update({
+          status: 'released',
+          released_at: new Date().toISOString(),
+          released_by: userId,
+          release_reason: releaseReason,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('payment_id', payment.id);
+
+      if (escrowError) {
+        this.logger.error(`Failed to update escrow account: ${escrowError.message}`, escrowError);
+        throw escrowError;
+      }
+
+      // 2. Update payments table
+      const { error: paymentError } = await this.supabase
+        .from('payments')
+        .update({
+          escrow_status: 'released',
+          escrow_released_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', payment.id);
+
+      if (paymentError) {
+        this.logger.error(`Failed to update payment: ${paymentError.message}`, paymentError);
+        throw paymentError;
+      }
+
+      // 3. Update devices table
+      const { error: deviceError } = await this.supabase
+        .from('devices')
+        .update({
+          status: 'completed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', deviceId);
+
+      if (deviceError) {
+        this.logger.error(`Failed to update device status: ${deviceError.message}`, deviceError);
+        throw deviceError;
+      }
+
+      // 4. Create audit_logs record
+      const { error: auditError } = await this.supabase
+        .from('audit_logs')
+        .insert({
+          event_type: 'escrow_released',
+          event_category: 'payment',
+          event_action: 'release',
+          event_severity: 'info',
+          user_id: userId,
+          resource_type: 'payment',
+          resource_id: payment.id,
+          event_description: 'Escrow released after device confirmation',
+          event_data: {
+            payment_id: payment.id,
+            device_id: deviceId,
+            net_payout: payment.net_payout,
+            released_at: new Date().toISOString(),
+            release_reason: releaseReason,
+          },
+        });
+
+      if (auditError) {
+        this.logger.error(`Failed to create audit log: ${auditError.message}`, auditError);
+        // Don't throw - audit logs are not critical
+      }
+
+      // 5. Create notifications records
+      // Notification for owner (payer)
+      const { error: ownerNotifError } = await this.supabase
+        .from('notifications')
+        .insert({
+          user_id: payment.payer_id,
+          message_key: 'escrow_released_owner',
+          type: 'success',
+          is_read: false,
+        });
+
+      if (ownerNotifError) {
+        this.logger.error(`Failed to create owner notification: ${ownerNotifError.message}`, ownerNotifError);
+        // Don't throw - notifications are not critical
+      }
+
+      // Notification for finder (receiver)
+      if (payment.receiver_id) {
+        const { error: finderNotifError } = await this.supabase
+          .from('notifications')
+          .insert({
+            user_id: payment.receiver_id,
+            message_key: 'escrow_released_finder',
+            type: 'payment_success',
+            is_read: false,
+          });
+
+        if (finderNotifError) {
+          this.logger.error(`Failed to create finder notification: ${finderNotifError.message}`, finderNotifError);
+          // Don't throw - notifications are not critical
+        }
+      }
+
+      this.logger.log(`Successfully updated database after escrow release: ${payment.id}`);
+    } catch (error: any) {
+      this.logger.error(`Error updating database after escrow release: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
 }
 

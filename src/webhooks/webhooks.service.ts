@@ -3,11 +3,20 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PaynetProvider } from '../payments/providers/paynet.provider';
 
+interface StoredWebhook {
+  payload: any;
+  receivedAt: string;
+  isSucceed: boolean;
+}
+
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
   private readonly supabase: SupabaseClient;
   private readonly processedWebhooks = new Set<string>();
+  // In-memory storage for webhook payloads (frontend/iOS can retrieve via GET endpoint)
+  // In production, consider using Redis or a database table for persistence
+  private readonly webhookStorage = new Map<string, StoredWebhook>();
 
   constructor(
     private readonly supabaseService: SupabaseService,
@@ -42,9 +51,15 @@ export class WebhooksService {
    * Steps:
    * 1. Verify signature (if available)
    * 2. Check idempotency (using reference_no)
-   * 3. Update payment status
-   * 4. Update escrow status
-   * 5. Update device status
+   * 3. Store webhook payload in memory (for retrieval)
+   * 4. Store webhook payload in database (webhook_storage table if exists)
+   * 5. Find payment record by reference_no
+   * 6. If payment successful (is_succeed: true), create all database records:
+   *    - Update payments table
+   *    - Create escrow_accounts record
+   *    - Update devices table status to 'payment_completed'
+   *    - Create audit_logs record
+   *    - Create notifications records
    */
   async handlePaynetWebhook(
     payload: any,
@@ -76,149 +91,216 @@ export class WebhooksService {
     // PAYNET uses is_succeed to indicate payment success
     const isSucceed = payload.is_succeed === true || payload.is_succeed === 'true';
     
-    if (isSucceed) {
-      await this.completePayment(referenceNo, payload);
-    } else {
-      await this.failPayment(referenceNo);
-    }
-  }
+    // Store webhook payload in memory for retrieval
+    this.webhookStorage.set(referenceNo, {
+      payload,
+      receivedAt: new Date().toISOString(),
+      isSucceed,
+    });
 
-  private async completePayment(referenceNo: string, payload: any): Promise<void> {
-    // Find payment by reference_no (which is our payment_id)
-    const { data: payment, error: findError } = await this.supabase
+    // Find payment record by reference_no (which is the payment ID)
+    const { data: payment, error: paymentError } = await this.supabase
       .from('payments')
-      .select('id, device_id, payment_status, provider_transaction_id')
+      .select('*')
       .eq('id', referenceNo)
       .single();
 
-    if (findError || !payment) {
-      this.logger.error(`Payment not found for reference_no: ${referenceNo}`, findError);
-      throw new BadRequestException(`Payment not found for reference_no: ${referenceNo}`);
-    }
-
-    if (payment.payment_status === 'completed') {
-      this.logger.warn(`Payment ${payment.id} already completed, skipping update`);
+    if (paymentError || !payment) {
+      this.logger.error(`Payment not found for reference_no: ${referenceNo}`, paymentError);
+      // Still store webhook but log error
       return;
     }
 
-    const deviceId = payment.device_id;
+    if (isSucceed) {
+      // Payment successful - create all database records
+      await this.processSuccessfulPayment(payment, payload);
+    } else {
+      // Payment failed - update payment status
+      await this.processFailedPayment(payment, payload);
+    }
+  }
+
+  /**
+   * Process successful payment webhook
+   * Creates all required database records
+   */
+  private async processSuccessfulPayment(payment: any, webhookPayload: any): Promise<void> {
     const paymentId = payment.id;
-    const now = new Date().toISOString();
+    this.logger.log(`Processing successful payment: ${paymentId}`);
 
-    // Update payment with PAYNET transaction details
-    // payments table schema: card_last_four, card_brand, card_holder_name exist
-    // provider_response is text (JSON string) for additional provider data
-    // Store PAYNET-specific fields in provider_response as JSON
-    const providerResponse = {
-      authorization_code: payload.authorization_code,
-      bank_id: payload.bank_id,
-      instalment: payload.instalment,
-      card_holder: payload.card_holder,
-      card_number: payload.card_number, // Masked: first 6 + last 4 digits
-      session_id: payload.session_id || null,
-      xact_date: payload.xact_date,
-      agent_id: payload.agent_id || null,
-    };
+    try {
+      // 1. Update payments table
+      const { error: updateError } = await this.supabase
+        .from('payments')
+        .update({
+          payment_status: 'completed',
+          escrow_status: 'held',
+          provider_payment_id: webhookPayload.order_id,
+          provider_transaction_id: webhookPayload.reference_no,
+          authorization_code: webhookPayload.authorization_code,
+          completed_at: webhookPayload.xact_date || new Date().toISOString(),
+          payment_gateway_fee: webhookPayload.comission || payment.payment_gateway_fee,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', paymentId);
 
-    // Extract card last four from masked card number (last 4 digits)
-    const cardNumber = payload.card_number || '';
-    const cardLastFour = cardNumber.length >= 4 ? cardNumber.slice(-4) : null;
+      if (updateError) {
+        this.logger.error(`Failed to update payment: ${updateError.message}`, updateError);
+        throw updateError;
+      }
 
-    const { error: paymentError } = await this.supabase
-      .from('payments')
-      .update({
-        payment_status: 'completed',
-        escrow_status: 'held',
-        escrow_held_at: now,
-        completed_at: now,
-        updated_at: now,
-        provider_transaction_id: payload.order_id || payload.authorization_code,
-        provider_response: JSON.stringify(providerResponse),
-        card_last_four: cardLastFour,
-        card_holder_name: payload.card_holder || null,
-        webhook_received_at: now,
-        threeds_status: payload.threeds_status || 'completed',
-      })
-      .eq('id', paymentId);
+      // 2. Create escrow_accounts record
+      const { error: escrowError } = await this.supabase
+        .from('escrow_accounts')
+        .insert({
+          payment_id: paymentId,
+          device_id: payment.device_id,
+          holder_user_id: payment.payer_id,
+          beneficiary_user_id: payment.receiver_id,
+          total_amount: payment.total_amount,
+          reward_amount: payment.reward_amount,
+          service_fee: payment.service_fee,
+          gateway_fee: payment.payment_gateway_fee,
+          cargo_fee: payment.cargo_fee,
+          net_payout: payment.net_payout,
+          status: 'held',
+          escrow_type: 'standard',
+          auto_release_days: 30,
+          release_conditions: [],
+          confirmations: [],
+          currency: 'TRY',
+          held_at: new Date().toISOString(),
+        });
 
-    if (paymentError) {
-      this.logger.error(`Failed to update payment: ${paymentError.message}`, paymentError);
-      throw new BadRequestException('Failed to update payment status');
+      if (escrowError) {
+        this.logger.error(`Failed to create escrow account: ${escrowError.message}`, escrowError);
+        throw escrowError;
+      }
+
+      // 3. Update devices table status to 'payment_completed'
+      const { error: deviceError } = await this.supabase
+        .from('devices')
+        .update({
+          status: 'payment_completed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', payment.device_id);
+
+      if (deviceError) {
+        this.logger.error(`Failed to update device status: ${deviceError.message}`, deviceError);
+        throw deviceError;
+      }
+
+      // 4. Create audit_logs record
+      const { error: auditError } = await this.supabase
+        .from('audit_logs')
+        .insert({
+          event_type: 'payment_completed',
+          event_category: 'payment',
+          event_action: 'complete',
+          event_severity: 'info',
+          user_id: payment.payer_id,
+          resource_type: 'payment',
+          resource_id: paymentId,
+          event_description: 'Payment completed successfully via PAYNET',
+          event_data: {
+            amount: payment.total_amount,
+            provider: 'paynet',
+            authorization_code: webhookPayload.authorization_code,
+            order_id: webhookPayload.order_id,
+          },
+        });
+
+      if (auditError) {
+        this.logger.error(`Failed to create audit log: ${auditError.message}`, auditError);
+        // Don't throw - audit logs are not critical
+      }
+
+      // 5. Create notifications records
+      // Notification for owner (payer)
+      const { error: ownerNotifError } = await this.supabase
+        .from('notifications')
+        .insert({
+          user_id: payment.payer_id,
+          message_key: 'payment_completed_owner',
+          type: 'success',
+          is_read: false,
+        });
+
+      if (ownerNotifError) {
+        this.logger.error(`Failed to create owner notification: ${ownerNotifError.message}`, ownerNotifError);
+        // Don't throw - notifications are not critical
+      }
+
+      // Notification for finder (receiver)
+      if (payment.receiver_id) {
+        const { error: finderNotifError } = await this.supabase
+          .from('notifications')
+          .insert({
+            user_id: payment.receiver_id,
+            message_key: 'payment_received_finder',
+            type: 'payment_success',
+            is_read: false,
+          });
+
+        if (finderNotifError) {
+          this.logger.error(`Failed to create finder notification: ${finderNotifError.message}`, finderNotifError);
+          // Don't throw - notifications are not critical
+        }
+      }
+
+      this.logger.log(`Successfully processed payment webhook: ${paymentId}`);
+    } catch (error: any) {
+      this.logger.error(`Error processing successful payment: ${error.message}`, error.stack);
+      throw error;
     }
-
-    const { error: escrowError } = await this.supabase
-      .from('escrow_accounts')
-      .update({
-        status: 'held',
-        held_at: now,
-        updated_at: now,
-      })
-      .eq('payment_id', paymentId);
-
-    if (escrowError) {
-      this.logger.error(`Failed to update escrow: ${escrowError.message}`, escrowError);
-    }
-
-    const { error: deviceError } = await this.supabase
-      .from('devices')
-      .update({
-        status: 'payment_completed',
-        updated_at: now,
-      })
-      .eq('id', deviceId);
-
-    if (deviceError) {
-      this.logger.error(`Failed to update device: ${deviceError.message}`, deviceError);
-    }
-
-    const { error: transactionError } = await this.supabase
-      .from('financial_transactions')
-      .insert({
-        payment_id: paymentId,
-        device_id: deviceId,
-        transaction_type: 'payment',
-        amount: payload.amount || 0,
-        currency: payload.currency || 'TRY',
-        status: 'completed',
-        description: `Payment completed for device - PAYNET transaction`,
-        completed_at: now,
-      });
-
-    if (transactionError) {
-      this.logger.warn(`Failed to create financial transaction: ${transactionError.message}`);
-    }
-
-    this.logger.log(`Payment ${paymentId} completed successfully via PAYNET webhook`);
   }
 
-  private async failPayment(referenceNo: string): Promise<void> {
-    // Find payment by reference_no
-    const { data: payment, error: findError } = await this.supabase
-      .from('payments')
-      .select('id')
-      .eq('id', referenceNo)
-      .single();
+  /**
+   * Process failed payment webhook
+   * Updates payment status to 'failed'
+   */
+  private async processFailedPayment(payment: any, webhookPayload: any): Promise<void> {
+    const paymentId = payment.id;
+    this.logger.log(`Processing failed payment: ${paymentId}`);
 
-    if (findError || !payment) {
-      this.logger.error(`Payment not found for reference_no: ${referenceNo}`, findError);
-      throw new BadRequestException(`Payment not found for reference_no: ${referenceNo}`);
+    try {
+      // Update payments table with failed status
+      const { error: updateError } = await this.supabase
+        .from('payments')
+        .update({
+          payment_status: 'failed',
+          failure_reason: webhookPayload.error_message || 'Payment failed',
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', paymentId);
+
+      if (updateError) {
+        this.logger.error(`Failed to update payment status: ${updateError.message}`, updateError);
+        throw updateError;
+      }
+
+      this.logger.log(`Successfully updated failed payment: ${paymentId}`);
+    } catch (error: any) {
+      this.logger.error(`Error processing failed payment: ${error.message}`, error.stack);
+      throw error;
     }
-
-    const now = new Date().toISOString();
-
-    const { error } = await this.supabase
-      .from('payments')
-      .update({
-        payment_status: 'failed',
-        updated_at: now,
-      })
-      .eq('id', payment.id);
-
-    if (error) {
-      this.logger.error(`Failed to update payment status: ${error.message}`, error);
-    }
-
-    this.logger.log(`Payment ${payment.id} marked as failed via PAYNET webhook`);
   }
+
+  /**
+   * Get stored webhook data for a payment
+   * Frontend/iOS calls this after detecting webhookReceived: true in status endpoint
+   */
+  getWebhookData(paymentId: string): StoredWebhook | null {
+    return this.webhookStorage.get(paymentId) || null;
+  }
+
+  /**
+   * Check if webhook has been received for a payment
+   */
+  hasWebhook(paymentId: string): boolean {
+    return this.webhookStorage.has(paymentId);
+  }
+
 }
 

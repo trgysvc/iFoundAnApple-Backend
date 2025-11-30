@@ -72,12 +72,25 @@ export type CargoStatus =
 - "returned" - Göndericiye iade edildi
 - "cancelled" - İptal edildi
 
+**BACKEND SORUMLULUĞU (Kargo Süreci):**
+- Backend, kargo firması ile haberleşmeyi sağlar
+- Frontend/iOS'tan gelen kargo gönderi talebini alır
+- Kargo firması API'si ile haberleşir ve takip numarası (`tracking_number`), teslim kodu (`code`) ve süreç bilgilerini alır
+- Kargo firmasından alınan bilgileri `cargo_shipments` tablosuna **yazar**
+- Kargo durumu güncellemelerini yapar
+- Frontend/iOS'a kargo bilgilerini döner
+
+**FRONTEND/IOS SORUMLULUĞU (Kargo Süreci):**
+- Backend'den gelen kargo bilgileri ile süreci işler
+- Kullanıcı ekranlarını düzenleyerek kullanıcıyı bilgilendirir
+
+**Teknik Detaylar:**
+- `cargo_shipments` tablosunda `code` sütunu bulunur (teslim kodu) ve bu kod **kargo firmasının API'si tarafından üretilir**
+- `tracking_number` (takip numarası) **kargo firmasının API'si tarafından üretilir** ve backend tarafından veritabanına yazılır
+- `cargo_status` sütunu kargo sürecinin detaylı durumunu takip eder
+
 **Önemli:** 
-- `cargo_shipments` tablosunda `code` sütunu bulunur (teslim kodu) ve bu kod **kargo firmasının API'si tarafından üretilir**.
-- Ödeme tamamlandıktan sonra sistem kargo firmasının API'sine gönderi bilgilerini gönderir.
-- Kargo firması API'si gönderi kaydı oluşturur ve teslim kodunu (`code`) üretir, API yanıtında döndürür.
-- Sistem bu kodu `cargo_shipments.code` sütununa yazar ve bulan kişiye gösterir.
-- Ayrıca `cargo_status` sütunu da bulunur ve kargo sürecinin detaylı durumunu takip eder.
+- **UI / Mobil Geliştirme Notu:** Cihaz sahibi (owner) ile cihazı bulan (finder) kullanıcı arayüzlerini ayırırken `status` alanına göre değil `devices.device_role` sütununa göre ayrımı yapın. Bir kullanıcı aynı anda her iki rolü de üstlenebileceği için, doğru ekran akışlarını seçmek için mutlaka `devices.device_role` sütununu (`'owner' | 'finder'`) temel alın. tüm süreç ekranlarında ve iOS gibi sonraki uygulamalarda da bu sütun, dinamik rol ayrımı için ana referans olmalıdır.
 
 
 ## 📊 VERİTABANI TABLOLARI VE SÜREÇ İLİŞKİSİ
@@ -233,8 +246,12 @@ Eposta: Zorunlu, e-mail formatı
 Doğum tarihi: Geçerli tarih, gelecek tarih kontrolü, minimum 13 yaş (COPPA uyumu), Boş ise ödemeyi güvenle yap butonu pasif
 TC Kimlik: 11 haneli, algoritma doğrulaması, Boş ise ödemeyi güvenle yap butonu pasif. veritabanında şifrelenerek (encryption at rest) sakla
 Telefon: Zorunlu, Türk telefon numarası formatı
-IBAN: TR ile başlayan 26 haneli format, Boş ise ödemeyi güvenle yap butonu pasif (Bu kural sadece Cihazı Bulan (Finder) kullanıcılar için geçerli olmalıdır. Cihaz Sahibi'nden IBAN istenmemeli veya zorunlu tutulmamalıdır.)
+IBAN: TR ile başlayan 26 haneli format, Mod 97 checksum kontrolü, IBAN validation key ile gerçek zamanlı doğrulama yapılabilir (opsiyonel). Boş ise ödemeyi güvenle yap butonu pasif (Bu kural sadece Cihazı Bulan (Finder) kullanıcılar için geçerli olmalıdır. Cihaz Sahibi'nden IBAN istenmemeli veya zorunlu tutulmamalıdır.)
 Adres: Boş ise ödemeyi güvenle yap butonu pasif. veritabanında şifrelenerek (encryption at rest) sakla
+
+**ÖNEMLİ - Encryption Key Backup:**
+Encryption key (`VITE_ENCRYPTION_KEY`) **manuel olarak** yedeklenmelidir. Key kaybı durumunda şifrelenmiş tüm veriler (TC Kimlik No, IBAN, adres bilgileri) kalıcı olarak kaybolur. Detaylı backup stratejisi için `BACKEND_INTEGRATION.md` ve `PROJECT_DESIGN_DOCUMENTATION.md` dosyalarına bakın.
+
 ---
 
 ### **Adım 2: Kayıp Cihaz Ekleme**
@@ -243,11 +260,13 @@ Dashboard → "Cihaz Ekle" → "Kaybettim" Seçeneği
 ```
 
 **Girilen Bilgiler:**
-- Cihaz Modeli: Dropdown'dan seçim (iPhone 15 Pro Max, vb.)
 - Seri Numarası: Manuel giriş (12 haneli)
+- Cihaz Modeli: Dropdown'dan seçim (iPhone 15 Pro Max, vb.)
+- Renk: Dropdown'dan seçim 
+- Satın Alma Kanıtı (Fatura) : Dosya Ekleme (isteğe bağlı)
 - Kayıp Tarihi: Tarih seçici
 - Kayıp Yeri: Serbest metin
-- Açıklama: Opsiyonel
+- Ek detaylar (isteğe bağlı): Opsiyonel
 
 
 **Database Kayıtları:**
@@ -351,18 +370,33 @@ Durum:  Kayıtlı XXX seri numaralı YYY cihazı eşleşme bekleniyor.
 
 ### **Adım 4: Eşleşme Bulundu**
 ```
-Sistem → Eşleşme buldu → Status: MATCHED
+Sistem → Eşleşme buldu → Status: MATCHED → Supabase veritabanı kontrolü → Owner için status: PAYMENT_PENDING
 ```
+
+**Eşleşme Kontrol Süreci:**
+1. Supabase veritabanı, iki tarafın (owner ve finder) eşleştiğini kontrol eder
+2. Eşleşme bulunduğunda, owner'ın device kaydının `status` değeri `'payment_pending'` olarak güncellenir
+3. Finder'ın device kaydının `status` değeri `'matched'` olarak kalır (ödeme bekleniyor)
+4. Owner ekranı `payment_pending` durumunu görünce ödeme yapma adımına geçer
 
 **Database Değişiklikleri:**
 
-**1. `devices` tablosunda güncelleme:**
+**1. `devices` tablosunda güncelleme (Owner için):**
 ```sql
 UPDATE devices 
 SET 
-  status = 'matched',
+  status = 'payment_pending',  -- Owner için ödeme bekleniyor durumu
   updated_at = now()
-WHERE id = [device_id];
+WHERE id = [owner_device_id] AND device_role = 'owner';
+```
+
+**2. `devices` tablosunda güncelleme (Finder için):**
+```sql
+UPDATE devices 
+SET 
+  status = 'matched',  -- Finder için eşleşme bulundu durumu
+  updated_at = now()
+WHERE id = [finder_device_id] AND device_role = 'finder';
 ```
 
 **2. `audit_logs` tablosuna kayıt:**
@@ -412,9 +446,11 @@ INSERT INTO notifications (
 - e-posta : (Supabase Edge Functions kullanarak Resend veya SendGrid gibi popüler e-posta servisleriyle çok kolay bir entegrasyon kurabilirsiniz)
 
 **Dashboard'da Görünen:**
-- Cihaz kartı mesajı: Eşleşti! Cihaz sahibi ödemesi bekleniyor.
-- Durum rengi: Yeşil 
-- Buton: YOK
+- Cihaz kartı mesajı: Eşleşti! Ödeme yapmanız gerekiyor.
+- Durum rengi: Turuncu/Sarı
+- Buton: "Ödemeyi Güvenle Yap"
+
+**Önemli:** Supabase veritabanı, eşleşme bulunduğunda owner'ın device kaydının `status` değerini `'payment_pending'` olarak günceller. Owner ekranı bu durumu görünce ödeme yapma adımına geçer.
 
 **DeviceDetailPage (Cihaz Detay Sayfası):**
 ```
@@ -578,20 +614,18 @@ Güvenli ödeme seçenekleri
 
 **Ödeme Seçenekleri:**
 
-1. **Stripe (Önerilen)**
+1. **PAYNET (Kredi Kartı)**
 ```
-   ○ Stripe
+   ○ PAYNET
      Tüm kartlarınızla güvenle ödeme
      🔒 SSL Güvenli Ödeme
+     ✅ 3D Secure Doğrulama
 ```
 
-2. **Sert Medya (Yakın Zamanda)**
-```
-   ○ Sert Medya (Bürüm Sandozer)
-     (Eczacı test API'si ile gençle ödeme testi)
-     ⏳ Hazırda    🔧 Denemenize Hazır
-     [YAKINDA]
-```
+**Önemli Not:**
+- Kart bilgileri PAYNET ödeme sürecinde girilir
+- Kart bilgileri sistemde veya veritabanında **ASLA TUTULMAZ**
+- Tüm kart bilgileri doğrudan PAYNET API'sine gönderilir
 
 **Güvenlik Rozetleri:**
 ```
@@ -637,9 +671,45 @@ Kart bilgileriniz güvenli şekilde şifrelenir ve saklanmaz.
 ### **Ödeme Akışı Sonrası:**
 
 **Başarılı Ödeme:**
-1. Stripe/Ödeme sağlayıcı → 3D Secure doğrulama
-2. Ödeme onaylandı
-3. Yönlendirme → **DeviceDetailPage** (status: `payment_completed`)
+1. PAYNET → 3D Secure doğrulama
+2. Ödeme onaylandı (webhook: `is_succeed: true`)
+3. Backend: Webhook'u alır, doğrular ve işler
+4. Backend: Tüm veritabanı kayıtlarını oluşturur (payments, escrow_accounts, devices, audit_logs, notifications)
+5. Backend: Payment kaydını günceller (`status = 'completed'`)
+6. Frontend/iOS: Backend'den ödeme sonucunu alır (polling ile)
+7. Yönlendirme → **DeviceDetailPage** (status: `payment_completed`)
+
+**Başarısız Ödeme:**
+1. PAYNET → 3D Secure doğrulama
+2. Ödeme başarısız (webhook: `is_succeed: false` veya 3D Secure başarısız)
+3. Backend: Payment kaydını günceller (`status = 'failed'`)
+4. Backend: Webhook payload'ını veritabanında saklar (hata analizi için)
+5. Frontend/iOS: Hata mesajını gösterir
+6. Yönlendirme → **Ödeme Sayfası** (tekrar deneme için)
+
+**Başarısız Ödeme Senaryoları:**
+- **3D Secure Başarısız:** Kullanıcı SMS kodunu yanlış girer veya işlemi iptal eder
+- **Yetersiz Bakiye:** Kartta yeterli bakiye yok
+- **Kart Reddedildi:** Banka tarafından işlem reddedildi
+- **Zaman Aşımı:** 3D Secure işlemi zaman aşımına uğradı
+- **Teknik Hata:** PAYNET API hatası veya ağ sorunu
+
+**Başarısız Ödeme İşlemleri:**
+```sql
+-- Backend, başarısız ödeme durumunda payment kaydını günceller:
+UPDATE payments 
+SET 
+  payment_status = 'failed',
+  failed_reason = [webhook_error_message],
+  failed_at = now(),
+  updated_at = now()
+WHERE id = [payment_id];
+```
+
+**Kullanıcı Deneyimi (Başarısız Ödeme):**
+- Hata mesajı gösterilir: "Ödeme başarısız oldu. Lütfen tekrar deneyin."
+- "Tekrar Dene" butonu ile ödeme sayfasına geri dönülür
+- Kullanıcı kart bilgilerini tekrar girebilir
 
 **Database Kayıtları (Ödeme Tamamlandıktan Sonra):**
 
@@ -663,7 +733,7 @@ ADIM 2: Ödeme Yöntemi Ekranı
   - Onay checkbox
   - "Güvenli Ödeme Yap" butonu
       ↓
-3D Secure Doğrulama (Stripe)
+3D Secure Doğrulama (PAYNET)
       ↓
 Ödeme Başarılı
       ↓
@@ -685,96 +755,70 @@ TOPLAM: 2,000.00 TL
 ```
 
 **Ücret Yapısı:**
+- **Ücretler Frontend/iOS tarafından hesaplanır** ve `feeBreakdown` olarak backend'e gönderilir
 - Gateway komisyonu: %3.43 (toplam üzerinden)
 - Kargo ücreti: 250.00 TL (sabit)
 - Bulan kişi ödülü: %20 (toplam üzerinden)
 - Hizmet bedeli: Geriye kalan tutar
+- Backend, frontend/iOS'tan gelen `feeBreakdown`'ı doğrular ancak hesaplamaz
 ---
 
 **Ödeme Akışı:**
-1. Ödeme yöntemi seçimi (Stripe/PAYNET-ApplePay-Kredi Kartı)
-2. Kart bilgileri girişi
-3. 3D Secure doğrulama
-4. Ödeme onayı
+1. Ödeme yöntemi seçimi (PAYNET - Kredi Kartı)
+2. Frontend/iOS: Ücretleri hesaplar (`feeBreakdown`) ve Backend API'ye `POST /v1/payments/process` isteği gönderir (feeBreakdown ile)
+3. Backend: Payment ID oluşturur ve veritabanına yazar (`payments` tablosuna `status = 'pending'` ile)
+4. Backend: Kullanıcıdan kart bilgilerini alır (PAN, ay, yıl, CVC, kart sahibi adı)
+5. Backend: Paynet API'ye ödeme başlatma isteği gönderilir (`POST /v2/transaction/tds_initial`) - kart bilgileri ve escrow parametresi ile
+6. Backend: Paynet'ten dönen `post_url` ve `html_content` frontend'e döner
+7. Frontend/iOS: `deviceId` ve `feeBreakdown`'ı localStorage/UserDefaults'a kaydeder
+8. Frontend/iOS: PAYNET'in döndüğü `post_url` veya `html_content` ile 3D Secure doğrulama ekranına yönlendirilir
+9. Kullanıcı: 3D Secure doğrulama işlemini tamamlar (SMS kodu girer)
+10. Bank: `return_url`'e `session_id` ve `token_id` POST eder
+11. Frontend/iOS: `POST /v1/payments/complete-3d` ile 3D Secure sonucu (`session_id`, `token_id`) backend'e iletilir
+12. Backend: Paynet API'ye 3D Secure sonucu gönderilir (`POST /v2/transaction/tds_charge`)
+13. Backend: Paynet webhook'u beklenir
+14. PAYNET → Backend: Webhook (ödeme başarılı/başarısız)
+15. Backend: Webhook'u doğrular (IP whitelist, signature) ve **veritabanına saklar** (`webhook_storage` veya benzeri tablo)
+16. Backend: Webhook'tan gelen `reference_no` ile payment ID'yi eşleştirir ve payment kaydını günceller
+17. Backend: Webhook geldiğinde ve ödeme başarılı olduğunda (is_succeed: true) **tüm veritabanı kayıtlarını oluşturur:**
+    - `payments` tablosunda mevcut kaydı günceller (status, provider bilgileri, fee breakdown vb.)
+    - `escrow_accounts` tablosuna kayıt oluşturur
+    - `devices` tablosunda status'u `payment_completed` yapar
+    - `audit_logs` tablosuna kayıt oluşturur
+    - `notifications` tablosuna bildirim kayıtları oluşturur
+18. Frontend/iOS: Polling yapar (`GET /v1/payments/{paymentId}/status`) - webhook işlenene kadar (30 deneme, 10 saniye aralık)
+19. Frontend/iOS: `paymentStatus: 'completed'` olduğunda ödeme başarılı sayfasına yönlendirilir
 
-**Database Kayıtları:**
+**ÖNEMLİ NOT:**
+- **Backend, ödeme başlatıldığında payment ID oluşturur ve veritabanına yazar** (`payments` tablosuna `status = 'pending'` ile)
+- Backend, webhook geldiğinde `reference_no` ile payment ID'yi eşleştirir ve **tüm veritabanı kayıtlarını oluşturur**
+- Backend, webhook payload'ını **veritabanında saklar** (ileride referans için)
+- **Backend, webhook geldiğinde tüm ilgili tablolara (payments, escrow_accounts, devices, audit_logs) yazar**
+- Bu yaklaşım, güvenli ve merkezi ödeme yönetimi sağlar
 
-**1. `payments` tablosuna kayıt:**
-```sql
-INSERT INTO payments (
-  id,                    -- gen_random_uuid()
-  device_id,             -- Device ID'si
-  payer_id,              -- Cihaz sahibinin ID'si (ödemeyi yapan)
-  receiver_id,           -- Bulan kişinin ID'si (ödülü alacak)
-  total_amount,          -- Toplam ödeme tutarı
-  reward_amount,         -- Ödül miktarı
-  cargo_fee,             -- Kargo ücreti (25.00)
-  payment_gateway_fee,   -- Gateway ücreti
-  service_fee,           -- Hizmet bedeli
-  net_payout,            -- Bulan kişiye gidecek net tutar
-  payment_provider,      -- 'iyzico'
-  payment_status,        -- 'pending'
-  escrow_status,         -- 'pending'
-  currency,              -- 'TRY'
-  created_at,            -- now()
-  updated_at             -- now()
-);
-```
+**Backend Sorumluluğu (Ödeme Süreci):**
+- Backend, Paynet ile ödeme haberleşmesini üstlenir
+- Frontend/iOS'tan gelen ödeme talebini alır
+- **Payment ID oluşturur ve veritabanına yazar** (`payments` tablosuna `status = 'pending'` ile)
+- Kullanıcıdan kart bilgilerini alır (PAN, ay, yıl, CVC, kart sahibi adı)
+- Paynet API ile haberleşerek başarılı/başarısız ödeme sürecini yönetir
+- Webhook'u alır, doğrular ve **veritabanında saklar**
+- Webhook geldiğinde `reference_no` ile payment ID'yi eşleştirir
+- **Webhook başarılı olduğunda (is_succeed: true) backend tüm veritabanı kayıtlarını oluşturur:**
+  - `payments` tablosunu günceller (status, provider bilgileri, fee breakdown vb.)
+  - `escrow_accounts` tablosuna kayıt oluşturur
+  - `devices` tablosunda status'u `payment_completed` yapar
+  - `audit_logs` tablosuna kayıt oluşturur
+  - `notifications` tablosuna bildirim kayıtları oluşturur
+- Payment status kontrolü için endpoint sağlar (`GET /v1/payments/{paymentId}/status`)
+- Ödeme sonucunu frontend/iOS'a bildirir
 
-**2. `escrow_accounts` tablosuna kayıt:**
-```sql
-INSERT INTO escrow_accounts (
-  id,                    -- gen_random_uuid()
-  payment_id,            -- Payment ID'si
-  device_id,             -- Device ID'si
-  holder_user_id,        -- Cihaz sahibinin ID'si (parayı yatıran)
-  beneficiary_user_id,   -- Bulan kişinin ID'si (parayı alacak)
-  total_amount,          -- Toplam tutar
-  reward_amount,         -- Ödül miktarı
-  service_fee,           -- Hizmet bedeli
-  gateway_fee,           -- Gateway ücreti
-  cargo_fee,             -- Kargo ücreti
-  net_payout,            -- Net ödeme
-  status,                -- 'pending'
-  currency,              -- 'TRY'
-  release_conditions,    -- '[]' (JSON array)
-  confirmations,         -- '[]' (JSON array)
-  created_at,            -- now()
-  updated_at             -- now()
-);
-```
-
-**3. `devices` tablosunda güncelleme:**
-```sql
-UPDATE devices 
-SET 
-  status = 'payment_pending',
-  updated_at = now()
-WHERE id = [device_id];
-```
-
-**4. `audit_logs` tablosuna kayıt:**
-```sql
-INSERT INTO audit_logs (
-  id,                    -- gen_random_uuid()
-  event_type,           -- 'payment_initiated'
-  event_category,       -- 'payment'
-  event_action,         -- 'create'
-  event_severity,       -- 'info'
-  user_id,              -- Cihaz sahibinin ID'si
-  resource_type,        -- 'payment'
-  resource_id,          -- Payment ID'si
-  event_description,    -- 'Payment initiated for device'
-  event_data,           -- JSON: {total_amount, reward_amount, fees}
-  created_at            -- now()
-);
-```
-
-**5. `notifications` tablosuna kayıt:**
-```sql
--- NOT: Ödeme başlatıldığında bildirim gönderilmez, sadece ödeme tamamlandığında gönderilir
--- Bu adımda notification kaydı oluşturulmaz
-```
+**Frontend/iOS Sorumluluğu (Ödeme Süreci):**
+- Ödeme başlatma isteğini backend'e gönderir (deviceId, totalAmount, feeBreakdown ile)
+- 3D Secure sonucunu backend'e iletir (session_id, token_id)
+- Backend'den ödeme sonucunu alır (polling veya webhook notification ile)
+- **SADECE** kullanıcı ekranlarını düzenleyerek kullanıcıyı bilgilendirir
+- **Frontend/iOS veritabanına YAZMAZ** - Tüm veritabanı işlemleri backend tarafından yapılır
 
 ### **Adım 6: Ödeme Tamamlandı - Kargo Kodu Oluşturma ve Kargo Bekleme**
 ```
@@ -832,33 +876,102 @@ Escrow Tutarı:
 **Bildirimler:**
 - In-app: 
 ---
-**Database Güncellemeleri:**
+**Database Güncellemeleri (Backend Tarafından Yapılır):**
 
-**1. `payments` tablosunda güncelleme:**
+**ÖNEMLİ:** Tüm veritabanı kayıtları **webhook geldiğinde ve ödeme başarılı olduğunda (is_succeed: true)** backend tarafından oluşturulur. Bu, güncel mimari standartlarına ve güvenliğe uygun olan yöntemdir.
+
+**Webhook İşleme Süreci:**
+1. Backend Paynet'ten webhook alır (`POST /v1/webhooks/paynet-callback`)
+2. Backend webhook'u doğrular (IP whitelist, signature)
+3. Backend webhook payload'ını **veritabanında saklar** (`webhook_storage` veya benzeri tablo)
+4. Backend webhook'tan gelen `reference_no` ile payment ID'yi eşleştirir
+5. Backend, webhook'tan gelen `is_succeed` değerini kontrol eder
+6. **Eğer ödeme başarılı (is_succeed: true) ise, backend tüm veritabanı kayıtlarını oluşturur:**
+   - `payments` tablosunda mevcut kaydı günceller (status, provider bilgileri, fee breakdown vb.)
+   - `escrow_accounts` tablosuna kayıt oluşturur
+   - `devices` tablosunda status'u `payment_completed` yapar
+   - `audit_logs` tablosuna kayıt oluşturur
+   - `notifications` tablosuna bildirim kayıtları oluşturur
+7. Frontend/iOS polling yaparak ödeme durumunu kontrol eder (`GET /v1/payments/{paymentId}/status`) - 30 deneme, 10 saniye aralık
+8. Frontend/iOS: `paymentStatus: 'completed'` olduğunda ödeme başarılı sayfasına yönlendirilir
+
+**1. `payments` tablosuna kayıt oluşturma (Backend tarafından - Ödeme başlatıldığında):**
 ```sql
+-- Backend, ödeme başlatıldığında payment ID oluşturur ve veritabanına yazar:
+INSERT INTO payments (
+  id,                    -- Backend tarafından generate edilen payment ID (UUID)
+  device_id,             -- Device ID'si
+  payer_id,              -- Cihaz sahibinin ID'si (ödemeyi yapan)
+  total_amount,          -- Frontend/iOS'tan gelen totalAmount
+  payment_provider,      -- 'paynet'
+  payment_status,        -- 'pending' (ödeme başlatıldı, webhook bekleniyor)
+  escrow_status,         -- 'pending'
+  currency,              -- 'TRY'
+  created_at,            -- now()
+  updated_at             -- now()
+);
+```
+
+**2. `payments` tablosunda güncelleme (Backend tarafından - Webhook geldiğinde):**
+```sql
+-- Backend, webhook geldiğinde reference_no ile payment ID'yi eşleştirir ve günceller:
 UPDATE payments 
 SET 
-  payment_status = 'completed',
-  escrow_status = 'held',
-  escrow_held_at = now(),
-  completed_at = now(),
+  receiver_id = [bulan_kişi_user_id],  -- Matched device'ın user_id'si
+  total_amount = [webhook_amount],      -- Webhook'tan gelen amount
+  payment_gateway_fee = [webhook_comission],  -- Webhook'tan gelen comission
+  payment_status = 'completed',        -- Webhook'tan gelen is_succeed=true ise
+  escrow_status = 'held',               -- Escrow ile ödeme yapıldığı için
+  provider_payment_id = [webhook_order_id],   -- Webhook'tan gelen order_id
+  provider_transaction_id = [webhook_reference_no],  -- Webhook'tan gelen reference_no
+  authorization_code = [webhook_authorization_code],  -- Webhook'tan gelen authorization_code
+  completed_at = [webhook_xact_date],   -- Webhook'tan gelen xact_date
+  updated_at = now()
+WHERE id = [payment_id] AND provider_transaction_id IS NULL;
+```
+
+**3. `payments` tablosunda güncelleme (Backend tarafından - Webhook geldiğinde, ödeme başarılı olduğunda):**
+```sql
+-- Backend, webhook geldiğinde ve ödeme başarılı olduğunda fee breakdown bilgilerini ekler:
+UPDATE payments 
+SET 
+  reward_amount = [fee_breakdown_reward_amount],  -- Frontend/iOS'tan gelen feeBreakdown'dan
+  cargo_fee = [fee_breakdown_cargo_fee],
+  service_fee = [fee_breakdown_service_fee],
+  net_payout = [fee_breakdown_net_payout],
   updated_at = now()
 WHERE id = [payment_id];
 ```
 
-**2. `escrow_accounts` tablosunda güncelleme:**
+**2. `escrow_accounts` tablosuna kayıt oluşturma (Backend tarafından - Webhook geldiğinde, ödeme başarılı olduğunda):**
 ```sql
-UPDATE escrow_accounts 
-SET 
-  status = 'held',
-  held_at = now(),
-  updated_at = now()
-WHERE payment_id = [payment_id];
+-- Backend, webhook geldiğinde ve ödeme başarılı olduğunda (is_succeed: true) escrow kaydını oluşturur:
+INSERT INTO escrow_accounts (
+  id,                    -- gen_random_uuid()
+  payment_id,            -- Payment ID'si
+  device_id,             -- Device ID'si
+  holder_user_id,        -- Cihaz sahibinin ID'si (parayı yatıran)
+  beneficiary_user_id,   -- Bulan kişinin ID'si (parayı alacak)
+  total_amount,          -- Fee breakdown'tan (Frontend/iOS'tan gelen feeBreakdown)
+  reward_amount,         -- Fee breakdown'tan
+  service_fee,           -- Fee breakdown'tan
+  gateway_fee,           -- Fee breakdown'tan
+  cargo_fee,             -- Fee breakdown'tan
+  net_payout,            -- Fee breakdown'tan
+  status,                -- 'held' (escrow ile ödeme yapıldığı için)
+  escrow_type,           -- 'standard'
+  auto_release_days,     -- 30
+  release_conditions,    -- JSON array: [{type: 'device_received', met: false}, ...]
+  confirmations,         -- '[]' (JSON array)
+  held_at,               -- now()
+  created_at,            -- now()
+  updated_at             -- now()
+);
 ```
 
-**3. `devices` tablosunda güncelleme:**
+**3. `devices` tablosunda güncelleme (Backend tarafından - Webhook geldiğinde, ödeme başarılı olduğunda):**
 ```sql
--- Ödeme webhook/callback geldiğinde:
+-- Backend, webhook geldiğinde ve ödeme başarılı olduğunda (is_succeed: true) device status'u günceller:
 UPDATE devices 
 SET 
   status = 'payment_completed',
@@ -866,12 +979,63 @@ SET
 WHERE id = [device_id];
 ```
 
-**Not:** Bu güncelleme ödeme sağlayıcısından (iyzico/stripe) webhook/callback geldiğinde otomatik olarak yapılır. `api/webhooks/iyzico-callback.ts` veya `api/webhooks/iyzico-3d-callback.ts` dosyaları bu işlemi gerçekleştirir.
+**4. `audit_logs` tablosuna kayıt (Backend tarafından - Webhook geldiğinde, ödeme başarılı olduğunda):**
+```sql
+-- Backend, webhook geldiğinde ve ödeme başarılı olduğunda (is_succeed: true) audit log kaydı oluşturur:
+INSERT INTO audit_logs (
+  id,                    -- gen_random_uuid()
+  event_type,           -- 'payment_completed'
+  event_category,       -- 'payment'
+  event_action,         -- 'complete'
+  event_severity,       -- 'info'
+  user_id,              -- Cihaz sahibinin ID'si
+  resource_type,        -- 'payment'
+  resource_id,          -- Payment ID'si
+  event_description,    -- 'Payment completed successfully via PAYNET'
+  event_data,           -- JSON: {amount, provider, authorization_code}
+  created_at            -- now()
+);
+```
+
+**5. `notifications` tablosuna kayıt (Backend tarafından - Webhook geldiğinde, ödeme başarılı olduğunda):**
+```sql
+-- Backend, webhook geldiğinde ve ödeme başarılı olduğunda (is_succeed: true) bildirim kayıtları oluşturur:
+-- Cihaz sahibine bildirim
+INSERT INTO notifications (
+  id,                    -- gen_random_uuid()
+  user_id,              -- Cihaz sahibinin ID'si
+  message_key,          -- 'payment_completed_owner'
+  type,                 -- 'success'
+  is_read,              -- false
+  created_at            -- now()
+);
+
+-- Bulan kişiye bildirim
+INSERT INTO notifications (
+  id,                    -- gen_random_uuid()
+  user_id,              -- Bulan kişinin ID'si
+  message_key,          -- 'payment_received_finder'
+  type,                 -- 'payment_success'
+  is_read,              -- false
+  created_at            -- now()
+);
+```
+
+**ÖNEMLİ NOTLAR:** 
+- **Backend, ödeme başlatıldığında payment ID oluşturur ve veritabanına yazar** (`payments` tablosuna `status = 'pending'` ile)
+- **Backend, webhook geldiğinde payload'ı veritabanında saklar ve tüm veritabanı kayıtlarını oluşturur**
+- **Backend, webhook'tan gelen `reference_no` ile payment ID'yi eşleştirir**
+- **Backend, webhook başarılı olduğunda (is_succeed: true) tüm tablolara yazar: payments, escrow_accounts, devices, audit_logs, notifications**
+- **Frontend/iOS, backend'den ödeme sonucunu alır ve sadece kullanıcıya gösterir - veritabanına YAZMAZ**
+- Bu yaklaşım, güvenli ve merkezi ödeme yönetimi sağlar ve güncel mimari standartlarına uygundur
 
 **4. Kargo Firması API Çağrısı ve `cargo_shipments` Kaydı:**
 ```sql
--- Ödeme tamamlandıktan sonra sistem otomatik olarak kargo firmasının API'sine istek gönderir:
--- POST /api/cargo/create-shipment
+-- ÖNEMLİ: Backend'de kargo firması ile iletişim kuran ayrı bir API servisi bulunur.
+-- Bu API sadece kargo süreçlerini yönetir ve kargo firmasından aldığı takip numarasını veritabanına yazma yetkisine sahiptir.
+
+-- Frontend/iOS: Backend kargo API'sine gönderi oluşturma isteği gönderir
+-- POST /api/cargo/create-shipment (Backend kargo API endpoint)
 -- Request Body:
 -- {
 --   "device_id": "...",
@@ -882,15 +1046,16 @@ WHERE id = [device_id];
 --   ...
 -- }
 --
--- Kargo firması API yanıtı:
+-- Backend Kargo API: Kargo firmasının API'sine istek gönderir
+-- Backend Kargo API: Kargo firmasından gelen yanıtı alır:
 -- {
 --   "code": "ABC12345",              // Kargo firması tarafından üretilen teslim kodu
---   "tracking_number": "123456789",   // Takip numarası (opsiyonel, bazı firmalar şubede üretir)
+--   "tracking_number": "123456789",   // Kargo firması tarafından üretilen takip numarası
 --   "estimated_delivery": "2025-01-15",
 --   ...
 -- }
 --
--- Sistem, API yanıtından gelen bilgileri cargo_shipments tablosuna kaydeder:
+-- Backend Kargo API: Kargo firmasından aldığı bilgileri cargo_shipments tablosuna yazar:
 INSERT INTO cargo_shipments (
   id,
   device_id,
@@ -918,72 +1083,19 @@ INSERT INTO cargo_shipments (
 ```
 
 **Önemli Not:** 
-- Teslim kodu (`code`) **kargo firmasının API'si tarafından üretilir**, sistem tarafından değil.
+- **Backend'de kargo firması ile iletişim kuran ayrı bir API servisi bulunur.**
+- **Bu API sadece kargo süreçlerini yönetir ve kargo firmasından aldığı takip numarasını veritabanına yazma yetkisine sahiptir.**
+- Teslim kodu (`code`) ve takip numarası (`tracking_number`) **kargo firmasının API'si tarafından üretilir**, sistem tarafından değil.
 - Kargo firması API'sine gönderi oluşturma isteği gönderilirken, bulan kişinin ve cihaz sahibinin adres bilgileri şifrelenmiş halde gönderilir (kimlik bilgileri gizli kalır).
+- Backend kargo API'si, kargo firmasından aldığı `code` ve `tracking_number` bilgilerini `cargo_shipments` tablosuna yazar.
 - API yanıtında dönen `code` değeri bulan kişiye gösterilir ve bulan kişi bu kod ile kargo firmasına gidip cihazı teslim edecektir.
 
-**4. `financial_transactions` tablosuna kayıt:**
-```sql
-INSERT INTO financial_transactions (
-  id,                    -- gen_random_uuid()
-  payment_id,            -- Payment ID'si
-  device_id,             -- Device ID'si
-  from_user_id,          -- Cihaz sahibinin ID'si
-  to_user_id,            -- Bulan kişinin ID'si
-  transaction_type,       -- 'payment'
-  amount,                -- Toplam ödeme tutarı
-  currency,              -- 'TRY'
-  status,                -- 'completed'
-  description,           -- 'Payment completed for device'
-  created_at,            -- now()
-  completed_at           -- now()
-);
-```
 
-**5. `audit_logs` tablosuna kayıt:**
+**7. `cargo_shipments` tablosuna kayıt (Backend Kargo API tarafından oluşturulur):**
 ```sql
-INSERT INTO audit_logs (
-  id,                    -- gen_random_uuid()
-  event_type,           -- 'payment_completed'
-  event_category,       -- 'payment'
-  event_action,         -- 'complete'
-  event_severity,       -- 'info'
-  user_id,              -- Cihaz sahibinin ID'si
-  resource_type,        -- 'payment'
-  resource_id,          -- Payment ID'si
-  event_description,    -- 'Payment completed successfully'
-  event_data,           -- JSON: {total_amount, payment_provider}
-  created_at            -- now()
-);
-```
-
-**6. `notifications` tablosuna kayıtlar:**
-```sql
--- Cihaz sahibine bildirim
-INSERT INTO notifications (
-  id,                    -- gen_random_uuid()
-  user_id,              -- Cihaz sahibinin ID'si
-  message_key,          -- 'payment_completed_owner'
-  type,                 -- 'success'
-  is_read,              -- false
-  created_at            -- now()
-);
-
--- Bulan kişiye bildirim
-INSERT INTO notifications (
-  id,                    -- gen_random_uuid()
-  user_id,              -- Bulan kişinin ID'si
-  message_key,          -- 'payment_received_finder'
-  type,                 -- 'payment_success'
-  is_read,              -- false
-  created_at            -- now()
-);
-```
-
-**7. `cargo_shipments` tablosuna kayıt (Kargo firması API'si ile oluşturulur):**
-```sql
--- Kargo firması API'sine gönderi bilgileri gönderildiğinde, API cargo_code döndürür
--- Bu kod cargo_shipments tablosuna yazılır
+-- ÖNEMLİ: Backend kargo API'si, kargo firması API'si ile iletişim kurar ve aldığı bilgileri veritabanına yazar.
+-- Kargo firması API'sine gönderi bilgileri gönderildiğinde, API code ve tracking_number döndürür
+-- Backend kargo API'si bu bilgileri cargo_shipments tablosuna yazar
 INSERT INTO cargo_shipments (
   id,                          -- gen_random_uuid()
   device_id,                   -- Cihaz ID'si (owner'ın device ID'si)
@@ -1009,11 +1121,14 @@ INSERT INTO cargo_shipments (
 );
 ```
 
-**Önemli:** 
-- `code` (teslim kodu) **kargo firmasının API'si tarafından üretilir** ve API yanıtında döner.
-- Sistem, kargo firması API'sine gönderi bilgilerini (sender/receiver adresleri, cihaz bilgileri vb.) gönderir.
-- Kargo firması API'si cargo_code üretir ve bu kod `cargo_shipments.code` sütununa yazılır.
-- Bu kod bulan kişiye gösterilir ve bulan kişi bu kod ile kargo firmasına gidip cihazı teslim edecektir.
+**ÖNEMLİ - Kargo API Backend Yetkileri:**
+- **Backend'de kargo firması ile iletişim kuran ayrı bir API servisi bulunur.**
+- **Bu API sadece kargo süreçlerini yönetir ve kargo firmasından aldığı takip numarasını veritabanına yazma yetkisine sahiptir.**
+- `code` (teslim kodu) ve `tracking_number` (takip numarası) **kargo firmasının API'si tarafından üretilir** ve API yanıtında döner.
+- Frontend/iOS, backend kargo API'sine gönderi oluşturma isteği gönderir.
+- Backend kargo API'si, kargo firması API'si ile iletişim kurar ve yanıtı alır.
+- Backend kargo API'si, kargo firmasından aldığı `code` ve `tracking_number` bilgilerini `cargo_shipments` tablosuna yazar.
+- Bu kod ve takip numarası bulan kişiye gösterilir ve bulan kişi bu kod ile kargo firmasına gidip cihazı teslim edecektir.
 - `cargo_status` sütunu kargo sürecinin detaylı durumunu takip eder.
 
 ### **Adım 7: Kargo Gönderildi**
@@ -1022,28 +1137,29 @@ Bulan kişi teslim kodu ile kargo firmasına teslim etti → Kargo API'si tracki
 ```
 
 **Süreç Analizi:**
-1. Ödeme tamamlandıktan sonra, sistem kargo firmasının API'sine gönderi bilgilerini gönderir
-2. Kargo firması API'si gönderi bilgilerini işler ve:
+1. Ödeme tamamlandıktan sonra, Frontend/iOS backend kargo API'sine gönderi oluşturma isteği gönderir
+2. Backend kargo API'si, kargo firması API'si ile iletişim kurar
+3. Kargo firması API'si gönderi bilgilerini işler ve:
    - `code` (teslim kodu) üretir
-   - `tracking_number` (takip numarası) üretir (opsiyonel, bazı kargo firmaları hemen üretmeyebilir)
+   - `tracking_number` (takip numarası) üretir (kargo firması tarafından üretilir)
    - Bu bilgileri API yanıtında döndürür
-3. Sistem, API yanıtından gelen `code` ve `tracking_number` değerlerini `cargo_shipments` tablosuna kaydeder
-4. Bulan kişi `cargo_shipments.code` (teslim kodu) ile kargo firmasına gider ve cihazı teslim eder
-5. Kargo firması şubesinde işlem tamamlandığında, kargo firması API'si bizim sistemimize webhook gönderir
-6. Webhook'ta `tracking_number` (eğer henüz yoksa) ve kargo durumu güncellemesi gelir
-7. Sistem otomatik olarak `cargo_shipments` kaydını günceller:
+4. Backend kargo API'si, kargo firmasından aldığı `code` ve `tracking_number` bilgilerini `cargo_shipments` tablosuna yazar
+5. Bulan kişi `cargo_shipments.code` (teslim kodu) ile kargo firmasına gider ve cihazı teslim eder
+6. Kargo firması şubesinde işlem tamamlandığında, kargo firması API'si backend kargo API'sine webhook gönderir
+7. Backend kargo API'si webhook'u alır ve `cargo_shipments` tablosunu günceller (tracking_number, cargo_status vb.)
+8. Backend kargo API'si, webhook'tan gelen `tracking_number` (eğer henüz yoksa) ve kargo durumu güncellemesi ile `cargo_shipments` kaydını günceller:
    - `cargo_shipments.status` → 'used' olur (kod kullanıldı)
    - `cargo_shipments.cargo_status` → 'picked_up' olur
    - `cargo_shipments.used_at` → now() olur
    - `cargo_shipments.picked_up_at` → now() olur
    - `cargo_shipments.tracking_number` → Kargo firmasından gelen takip numarası (güncellenir veya eklenir)
-8. `devices.status` → 'cargo_shipped' olur
+10. Backend kargo API'si, `devices.status` → 'cargo_shipped' olarak günceller
 
-**Database Güncellemeleri:**
+**Database Güncellemeleri (Backend Kargo API Tarafından Yapılır):**
 
-**1. `cargo_shipments` tablosunda güncelleme (Kargo API'si tarafından otomatik yapılır):**
+**1. `cargo_shipments` tablosunda güncelleme:**
 ```sql
--- Kargo firması API'sinden tracking_number geldiğinde
+-- Backend kargo API'si, kargo firması API'sinden tracking_number geldiğinde
 UPDATE cargo_shipments 
 SET 
   tracking_number = [kargo_firmasından_gelen_takip_numarası],
@@ -1055,8 +1171,9 @@ SET
 WHERE device_id = [device_id] AND code = [teslim_kodu];
 ```
 
-**2. `devices` tablosunda güncelleme:**
+**2. `devices` tablosunda güncelleme (Backend Kargo API tarafından):**
 ```sql
+-- Backend kargo API'si, kargo firması webhook'u geldiğinde devices status'u günceller:
 UPDATE devices 
 SET 
   status = 'cargo_shipped',
@@ -1273,10 +1390,11 @@ Süreç Analizi: Kullanıcı "Onayla" butonuna bastığında, sürecin en kritik
 3. `cargo_shipments.delivery_confirmation_date` → now()
 4. `cargo_shipments.delivery_confirmation_id` → delivery_confirmations.id
 5. `devices.status` → 'confirmed' (geçici)
-6. `escrow_accounts.status` → 'released'
-7. `financial_transactions` kaydı oluşturulur (ödeme transferi)
-8. `devices.status` → 'completed' (final)
-9. `payments.status` → 'completed'
+6. **Backend: PAYNET API'ye escrow release isteği gönderilir** (`POST /v1/transaction/escrow_status_update`)
+7. `escrow_accounts.status` → 'released'
+8. `financial_transactions` kaydı oluşturulur (ödeme transferi)
+9. `devices.status` → 'completed' (final)
+10. `payments.status` → 'completed'
 
 **Database Güncellemeleri:**
 
@@ -1307,7 +1425,18 @@ SET
 WHERE device_id = [device_id];
 ```
 
-**3. `escrow_accounts` tablosunda güncelleme:**
+**3. Backend: PAYNET API'ye Escrow Release İsteği:**
+```javascript
+// Backend, onay sonrası PAYNET API'ye escrow release isteği gönderir:
+POST /v1/transaction/escrow_status_update
+{
+  "xact_id": "[paynet_transaction_id]",  // PAYNET işlem ID'si
+  "status": 2,                            // 2 = Onay (Release)
+  "note": "Device received and confirmed by owner"
+}
+```
+
+**4. `escrow_accounts` tablosunda güncelleme:**
 ```sql
 UPDATE escrow_accounts 
 SET 
@@ -1340,7 +1469,7 @@ INSERT INTO financial_transactions (
 );
 ```
 
-**5. `payments` tablosunda güncelleme:**
+**6. `payments` tablosunda güncelleme:**
 ```sql
 UPDATE payments 
 SET 
@@ -1350,7 +1479,7 @@ SET
 WHERE id = [payment_id];
 ```
 
-**6. `devices` tablosunda güncelleme:**
+**7. `devices` tablosunda güncelleme:**
 ```sql
 UPDATE devices 
 SET 
@@ -1361,7 +1490,7 @@ SET
 WHERE id = [device_id];
 ```
 
-**7. `notifications` tablosuna kayıtlar:**
+**8. `notifications` tablosuna kayıtlar:**
 ```sql
 -- Bulan kişiye bildirim (ödül serbest bırakıldı)
 INSERT INTO notifications (
@@ -1384,7 +1513,7 @@ INSERT INTO notifications (
 );
 ```
 
-**8. `audit_logs` tablosuna kayıt:**
+**9. `audit_logs` tablosuna kayıt:**
 ```sql
 INSERT INTO audit_logs (
   id,                    -- gen_random_uuid()
@@ -1469,17 +1598,18 @@ Dashboard → "Bulunan Cihaz Bildir
 ```
 
 **Girilen Bilgiler:**
-- Seri Numarası: Manuel giriş
-- Renk: Dropdown
-- Cihaz Modeli: Dropdown
-- Bulunma Tarihi: Tarih seçici
-- Bulunma Yeri: Serbest metin
+- Seri Numarası: Manuel giriş [zorunlu alan]
+- Renk: Dropdown [zorunlu alan]
+- Cihaz Modeli: Dropdown [zorunlu alan]
+- Bulunma Tarihi: Tarih seçici [zorunlu alan]
+- Bulunma Yeri: Serbest metin [zorunlu alan]
 - Ek Detaylar: Opsiyonel
-- Bulunan Cihazın Fotoğrafı: "Dosya Ekle Butonu" (Ön ve Arka İki Fotoğraf Kaydı)
+- Bulunan Cihazın Fotoğrafı: "Dosya Ekle Butonu" (Ön ve Arka İki Fotoğraf Kaydı) [zorunlu alan]
 
 **Dashboard'da Görünen:**
-- Mesaj: Buldunan cihazın sistem kaydı gerçekleşti.
-- Durum: ?
+- Cihaz kartı: "Bulunan Cihaz için Eşleşme Bekleniyor"
+- Durum rengi: Turuncu/Sarı
+- Bildirim: Var mı? VAR
 
 **DeviceDetailPage (Cihaz Detay Sayfası):**
 ```

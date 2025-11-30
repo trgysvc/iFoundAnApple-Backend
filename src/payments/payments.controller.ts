@@ -1,6 +1,6 @@
-import { Body, Controller, Get, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags, ApiParam } from '@nestjs/swagger';
 import { Request } from 'express';
 import { firstValueFrom } from 'rxjs';
 import { RequestUser } from '../auth/interfaces/request-user.interface';
@@ -9,6 +9,7 @@ import { PaymentResponseDto } from './dto/payment-response.dto';
 import { Complete3DPaymentDto } from './dto/complete-3d-payment.dto';
 import { PaymentsService } from './services/payments.service';
 import { PaynetProvider } from './providers/paynet.provider';
+import { WebhooksService } from '../webhooks/webhooks.service';
 
 @ApiTags('payments')
 @Controller('payments')
@@ -18,17 +19,21 @@ export class PaymentsController {
     private readonly paymentsService: PaymentsService,
     private readonly paynetProvider: PaynetProvider,
     private readonly httpService: HttpService,
+    private readonly webhooksService: WebhooksService,
   ) {}
 
-  @ApiOperation({ summary: 'Process payment for a matched device' })
+  @ApiOperation({ 
+    summary: 'Process payment with Paynet',
+    description: 'Backend initiates Paynet 3D Secure payment. Frontend/iOS will create payment and escrow records when webhook arrives.',
+  })
   @ApiResponse({
     status: 201,
-    description: 'Payment initiated successfully',
+    description: 'Payment initiated successfully with Paynet',
     type: PaymentResponseDto,
   })
-  @ApiResponse({ status: 400, description: 'Invalid payment request or amount mismatch' })
+  @ApiResponse({ status: 400, description: 'Invalid payment request, payment not in pending status, or validation failed' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 404, description: 'Device not found' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
   @Post('process')
   async processPayment(
     @Body() dto: ProcessPaymentDto,
@@ -206,5 +211,141 @@ export class PaymentsController {
         error: error.message,
       };
     }
+  }
+
+  @ApiOperation({
+    summary: 'Get payment status and webhook status',
+    description: 'Check payment status and whether webhook has been received. Frontend/iOS uses this for polling.',
+  })
+  @ApiParam({
+    name: 'paymentId',
+    description: 'Payment ID (UUID)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Payment status retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', example: '123e4567-e89b-12d3-a456-426614174000' },
+        deviceId: { type: 'string', example: '123e4567-e89b-12d3-a456-426614174000' },
+        paymentStatus: { type: 'string', example: 'pending' },
+        escrowStatus: { type: 'string', example: 'pending' },
+        webhookReceived: { type: 'boolean', example: true },
+        totalAmount: { type: 'number', example: 2000.0 },
+        providerTransactionId: { type: 'string', example: 'paynet-txn-123' },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  @Get(':paymentId/status')
+  async getPaymentStatus(
+    @Param('paymentId') paymentId: string,
+    @Req() request: Request,
+  ): Promise<{
+    id: string;
+    deviceId: string;
+    paymentStatus: string;
+    escrowStatus: string;
+    webhookReceived: boolean;
+    totalAmount: number;
+    providerTransactionId?: string;
+  }> {
+    const user = request.user as RequestUser;
+    if (!user) {
+      throw new Error('User not found in request');
+    }
+
+    return this.paymentsService.getPaymentStatus(paymentId, user.id);
+  }
+
+  @ApiOperation({
+    summary: 'Get webhook data for a payment',
+    description: 'Retrieve stored webhook payload. Frontend/iOS calls this after webhookReceived: true in status endpoint.',
+  })
+  @ApiParam({
+    name: 'paymentId',
+    description: 'Payment ID (UUID)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Webhook data retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        webhookData: {
+          type: 'object',
+          properties: {
+            reference_no: { type: 'string' },
+            is_succeed: { type: 'boolean' },
+            amount: { type: 'number' },
+            netAmount: { type: 'number' },
+            comission: { type: 'number' },
+            authorization_code: { type: 'string' },
+            order_id: { type: 'string' },
+            xact_date: { type: 'string' },
+          },
+        },
+        error: { type: 'string' },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'Payment or webhook data not found' })
+  @Get(':paymentId/webhook-data')
+  async getWebhookData(
+    @Param('paymentId') paymentId: string,
+    @Req() request: Request,
+  ): Promise<{
+    success: boolean;
+    webhookData?: any;
+    error?: string;
+  }> {
+    const user = request.user as RequestUser;
+    if (!user) {
+      throw new Error('User not found in request');
+    }
+
+    return this.paymentsService.getWebhookData(paymentId, user.id);
+  }
+
+  @ApiOperation({
+    summary: 'Release escrow payment',
+    description: 'Release escrow payment to beneficiary. Backend only communicates with Paynet API, does NOT write to database.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Escrow released successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        message: { type: 'string', example: 'Escrow released successfully' },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid request' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  @Post('release-escrow')
+  async releaseEscrow(
+    @Body() body: { paymentId: string; deviceId: string; releaseReason: string },
+    @Req() request: Request,
+  ): Promise<{ success: boolean; message: string }> {
+    const user = request.user as RequestUser;
+    if (!user) {
+      throw new Error('User not found in request');
+    }
+
+    return this.paymentsService.releaseEscrow(
+      body.paymentId,
+      body.deviceId,
+      body.releaseReason,
+      user.id,
+    );
   }
 }

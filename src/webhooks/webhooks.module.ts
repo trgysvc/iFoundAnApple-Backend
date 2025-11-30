@@ -9,6 +9,7 @@ import { WebhooksService } from './webhooks.service';
   imports: [HttpModule, SupabaseModule],
   controllers: [WebhooksController],
   providers: [WebhooksService, PaynetProvider],
+  exports: [WebhooksService],
 })
 export class WebhooksModule {}
 
