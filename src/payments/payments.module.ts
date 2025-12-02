@@ -10,7 +10,12 @@ import { PaymentReconciliationService } from './services/payment-reconciliation.
 import { PaymentsService } from './services/payments.service';
 
 @Module({
-  imports: [HttpModule, SupabaseModule, WebhooksModule, ScheduleModule],
+  imports: [
+    HttpModule,
+    SupabaseModule,
+    WebhooksModule,
+    ScheduleModule.forRoot(),
+  ],
   controllers: [PaymentsController],
   providers: [
     PaymentsService,
