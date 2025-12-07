@@ -270,5 +270,170 @@ Tüm payment endpoint'leri **JWT Bearer Token** gerektirir. Swagger'da:
 
 ---
 
-**Son Güncelleme:** Test rehberi hazırlandı - Production backend üzerinden test edilmeye hazır.
+## 📊 Test Sonuçları Raporu
+
+**Test Tarihi:** 2025-12-07  
+**Test Ortamı:** Production (`https://api.ifoundanapple.com`)  
+**Test Kullanıcısı:** turgaysavaci@gmail.com
+
+### Genel Durum Özeti
+
+| Endpoint | Durum | HTTP Kodu | Açıklama |
+|----------|-------|-----------|----------|
+| `GET /v1/health` | ✅ Başarılı | 200 | Health check çalışıyor |
+| `GET /v1/session` | ✅ Başarılı | 200 | Session bilgisi doğru dönüyor |
+| `GET /v1/admin/diagnostics` | ⚠️ Beklenen | 403 | Admin yetkisi yok (normal) |
+| `POST /v1/payments/process` | ❌ Hata | 404 | Device bulunamadı |
+| `POST /v1/payments/complete-3d` | ❌ Hata | 400 | Paynet API authentication hatası |
+| `GET /v1/payments/test-paynet-connection` | ✅ Başarılı | 200 | Paynet bağlantısı çalışıyor |
+| `GET /v1/payments/{id}/status` | ❌ Hata | 404 | Payment bulunamadı |
+| `GET /v1/payments/{id}/webhook-data` | ⚠️ Kısmi | 200 | Webhook data yok (beklenen) |
+| `POST /v1/payments/release-escrow` | ❌ Hata | 404 | Request body eksik |
+| `POST /v1/webhooks/paynet-callback` | ⚠️ Test edilemedi | - | Header'lar eksik |
+
+### ✅ Başarılı Testler
+
+1. **Health Check** (`GET /v1/health`)
+   - Durum: Çalışıyor
+   - Response: `{"status": "ok", "uptime": 31312.78, "timestamp": "2025-12-07T19:10:10.595Z"}`
+   - Sonuç: Backend çalışıyor
+
+2. **Session** (`GET /v1/session`)
+   - Durum: Çalışıyor
+   - Response: Kullanıcı bilgileri doğru dönüyor
+   - Sonuç: Authentication ve session yönetimi çalışıyor
+
+3. **Paynet Bağlantı Testi** (`GET /v1/payments/test-paynet-connection`)
+   - Durum: Başarılı
+   - Response: Tüm testler başarılı (`success: true`)
+   - Sonuç: Paynet API bağlantısı ve yapılandırma doğru
+
+### ❌ Hata Durumları ve Çözümler
+
+1. **Payment Process** (`POST /v1/payments/process`) - 404
+   - **Hata:** `"Device not found: 123e4567-e89b-12d3-a456-426614174000"`
+   - **Neden:** Test için gerçek bir device ID kullanılmamış
+   - **Çözüm:**
+     - Database'de `payment_pending` durumunda bir device oluşturun
+     - Veya mevcut bir device ID kullanın
+     - Request body'de `deviceId`, `totalAmount` ve `feeBreakdown` gönderin
+   - **Not:** Endpoint `deviceId` bekliyor, `paymentId` değil
+
+2. **Complete 3D** (`POST /v1/payments/complete-3d`) - 400
+   - **Hata:** `"Payment completion failed: Request failed with status code 401"`
+   - **Neden:** Paynet API authentication hatası
+   - **Olası Nedenler:**
+     - Test ortamında geçersiz `sessionId`/`tokenId` kullanılmış
+     - Paynet API key'leri yanlış veya süresi dolmuş olabilir
+     - Test ortamı ile production key'leri karışmış olabilir
+   - **Çözüm:**
+     - Gerçek bir 3D Secure akışından gelen `sessionId` ve `tokenId` kullanın
+     - Paynet test ortamı key'lerini kontrol edin
+     - Backend log'larını inceleyin
+
+3. **Payment Status** (`GET /v1/payments/{id}/status`) - 404
+   - **Hata:** `"Payment not found: 123e4567-e89b-12d3-a456-426614174000"`
+   - **Neden:** Test için gerçek bir payment ID kullanılmamış
+   - **Çözüm:**
+     - Önce `POST /v1/payments/process` ile bir payment oluşturun
+     - Dönen `paymentId`'yi kullanın
+
+4. **Release Escrow** (`POST /v1/payments/release-escrow`) - 404
+   - **Hata:** `"Payment not found: undefined"`
+   - **Neden:** Request body eksik veya yanlış format
+   - **Beklenen Format:**
+     ```json
+     {
+       "paymentId": "uuid",
+       "deviceId": "uuid",
+       "releaseReason": "string"
+     }
+     ```
+   - **Çözüm:** Request body'yi doğru formatta gönderin
+
+### ⚠️ Kısmi Başarılı / Beklenen Durumlar
+
+1. **Admin Diagnostics** (`GET /v1/admin/diagnostics`) - 403
+   - Durum: Beklenen
+   - Açıklama: Kullanıcı admin değil, bu normal
+   - Çözüm: Admin rolüne sahip bir kullanıcı ile test edin
+
+2. **Webhook Data** (`GET /v1/payments/{id}/webhook-data`) - 200
+   - Response: `{"success": false, "error": "Webhook data not found for this payment"}`
+   - Durum: Beklenen (henüz webhook gelmemiş)
+   - Açıklama: Webhook Paynet'ten otomatik gelir, test için gerçek bir ödeme gerekir
+
+3. **Webhook Callback** (`POST /v1/webhooks/paynet-callback`)
+   - Durum: Test edilemedi
+   - Neden: `x-paynet-signature` ve `x-paynet-timestamp` header'ları eksik
+   - Çözüm: Paynet'ten gelen gerçek webhook ile test edin
+
+### Öneriler ve Sonraki Adımlar
+
+#### Kritik Öncelik
+
+1. **Test Verisi Hazırlığı**
+   - Database'de test için:
+     - `payment_pending` durumunda bir device oluşturun
+     - İlgili `device_models` kaydı (`ifoundanapple_fee` ile)
+     - Eşleşmiş bir finder device (opsiyonel)
+
+2. **Paynet Authentication Sorunu**
+   - `complete-3d` endpoint'inde 401 hatası var
+   - Paynet API key'lerini kontrol edin
+   - Test ortamı key'lerinin doğru olduğundan emin olun
+   - Backend log'larını inceleyin
+
+3. **End-to-End Test Akışı**
+   - Gerçek bir ödeme akışı ile test edin:
+     1. Device oluştur → `payment_pending` durumuna getir
+     2. `POST /v1/payments/process` → Payment oluştur
+     3. 3D Secure sayfasına yönlendir
+     4. Gerçek `sessionId` ve `tokenId` al
+     5. `POST /v1/payments/complete-3d` → Ödemeyi tamamla
+     6. Webhook'u bekle
+     7. `GET /v1/payments/{id}/status` → Durumu kontrol et
+
+#### İyileştirme Önerileri (Uygulandı ✅)
+
+1. **Swagger Dokümantasyonu**
+   - ✅ `POST /v1/payments/process` için request body örneği güncellendi
+   - ✅ `deviceId`, `totalAmount` ve `feeBreakdown` zorunlu alanlar olarak belirtildi
+   - ✅ Hata mesajları daha açıklayıcı hale getirildi
+
+2. **Hata Mesajları**
+   - ✅ 404 hatalarında daha açıklayıcı mesajlar eklendi
+   - ✅ Örnek: "Device not found" yerine "Device not found. Please ensure the device exists and belongs to your account."
+
+3. **Paynet Authentication Hataları**
+   - ✅ 401 hataları için özel mesaj eklendi
+   - ✅ Paynet API key kontrolü için daha detaylı log'lar
+
+4. **Request Validation**
+   - ✅ Release escrow endpoint'inde request body validation eklendi
+   - ✅ Eksik alanlar için açıklayıcı hata mesajları
+
+### Sonuç
+
+**Genel Durum:** Backend temel işlevler açısından çalışıyor. Paynet bağlantısı doğru yapılandırılmış. Testlerdeki hatalar çoğunlukla test verisi eksikliğinden kaynaklanıyor.
+
+**Başarılı Alanlar:**
+- ✅ Health check çalışıyor
+- ✅ Authentication/Session yönetimi çalışıyor
+- ✅ Paynet API bağlantısı doğru yapılandırılmış
+
+**Dikkat Edilmesi Gerekenler:**
+- ⚠️ Paynet API authentication (401 hatası) - `complete-3d` endpoint'inde
+- ⚠️ Test verisi hazırlığı - Gerçek device/payment ID'leri gerekli
+- ⚠️ End-to-end test akışı - Gerçek ödeme akışı ile test edilmeli
+
+**Önerilen Aksiyon Planı:**
+1. ✅ Database'de test verisi oluştur (manuel veya migration ile)
+2. ⚠️ Paynet authentication sorununu çöz (401 hatası) - Backend log'larını kontrol et
+3. ⚠️ Gerçek ödeme akışı ile end-to-end test yap
+4. ⚠️ Webhook callback'i test et (gerçek webhook ile)
+
+---
+
+**Son Güncelleme:** 2025-12-07 - Test raporu eklendi ve iyileştirmeler uygulandı.
 

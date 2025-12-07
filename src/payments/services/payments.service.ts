@@ -159,7 +159,9 @@ export class PaymentsService {
 
     if (error || !data) {
       this.logger.error(`Device not found: ${deviceId}`, error);
-      throw new NotFoundException(`Device not found: ${deviceId}`);
+      throw new NotFoundException(
+        `Device not found: ${deviceId}. Please ensure the device exists and belongs to your account.`,
+      );
     }
 
     return data as DeviceInfo;
@@ -384,7 +386,9 @@ export class PaymentsService {
 
     if (paymentError || !payment) {
       this.logger.error(`Payment not found: ${paymentId}`, paymentError);
-      throw new NotFoundException(`Payment not found: ${paymentId}`);
+      throw new NotFoundException(
+        `Payment not found: ${paymentId}. Please ensure the payment ID is correct and the payment belongs to your account.`,
+      );
     }
 
     // Validate payment ownership (user must be payer or receiver)
@@ -460,7 +464,9 @@ export class PaymentsService {
       .single();
 
     if (paymentError || !payment) {
-      throw new NotFoundException(`Payment not found: ${paymentId}`);
+      throw new NotFoundException(
+        `Payment not found: ${paymentId}. Please provide a valid payment ID that belongs to your account.`,
+      );
     }
 
     // Validate payment ownership

@@ -333,6 +333,24 @@ export class PaynetProvider {
       return response.data;
     } catch (error: any) {
       this.logger.error(`PAYNET API error: ${error.message}`, error.stack);
+      
+      // Handle authentication errors specifically
+      if (error.response?.status === 401) {
+        this.logger.error(
+          'PAYNET API authentication failed. Check PAYNET_SECRET_KEY configuration.',
+        );
+        throw new InternalServerErrorException(
+          `Payment completion failed: PAYNET API authentication error. Please verify PAYNET_SECRET_KEY is correct and valid for the current environment (test/production). Original error: ${error.message}`,
+        );
+      }
+      
+      if (error.response) {
+        this.logger.error(`PAYNET API response: ${JSON.stringify(error.response.data)}`);
+        throw new InternalServerErrorException(
+          `Payment completion failed: ${error.response.data?.message || error.response.data?.error || error.message}`,
+        );
+      }
+      
       throw new InternalServerErrorException(
         `Payment completion error: ${error.message}`,
       );

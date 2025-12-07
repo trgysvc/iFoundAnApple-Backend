@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags, ApiParam } from '@nestjs/swagger';
 import { Request } from 'express';
@@ -24,16 +24,16 @@ export class PaymentsController {
 
   @ApiOperation({ 
     summary: 'Process payment with Paynet',
-    description: 'Backend initiates Paynet 3D Secure payment. Frontend/iOS will create payment and escrow records when webhook arrives.',
+    description: 'Backend initiates Paynet 3D Secure payment. Creates payment record in database and returns payment URL for 3D Secure verification. Device must exist and be in "payment_pending" status.',
   })
   @ApiResponse({
     status: 201,
     description: 'Payment initiated successfully with Paynet',
     type: PaymentResponseDto,
   })
-  @ApiResponse({ status: 400, description: 'Invalid payment request, payment not in pending status, or validation failed' })
+  @ApiResponse({ status: 400, description: 'Invalid payment request, device not in payment_pending status, amount validation failed, or no matched finder found' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 404, description: 'Payment not found' })
+  @ApiResponse({ status: 404, description: 'Device not found or device does not belong to the user' })
   @Post('process')
   async processPayment(
     @Body() dto: ProcessPaymentDto,
@@ -64,7 +64,7 @@ export class PaymentsController {
       },
     },
   })
-  @ApiResponse({ status: 400, description: 'Invalid request or payment already processed' })
+  @ApiResponse({ status: 400, description: 'Invalid request, payment already processed, or Paynet API authentication/validation error' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'Payment not found' })
   @Post('complete-3d')
@@ -315,7 +315,7 @@ export class PaymentsController {
 
   @ApiOperation({
     summary: 'Release escrow payment',
-    description: 'Release escrow payment to beneficiary. Backend only communicates with Paynet API, does NOT write to database.',
+    description: 'Release escrow payment to beneficiary. Backend communicates with Paynet API and updates database after successful release. Payment must be in "completed" status and escrow must be "held".',
   })
   @ApiResponse({
     status: 200,
@@ -328,9 +328,9 @@ export class PaymentsController {
       },
     },
   })
-  @ApiResponse({ status: 400, description: 'Invalid request' })
+  @ApiResponse({ status: 400, description: 'Invalid request, payment not in valid state for escrow release, or missing required fields (paymentId, deviceId, releaseReason)' })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 404, description: 'Payment not found' })
+  @ApiResponse({ status: 404, description: 'Payment not found or payment does not belong to the user' })
   @Post('release-escrow')
   async releaseEscrow(
     @Body() body: { paymentId: string; deviceId: string; releaseReason: string },
@@ -339,6 +339,13 @@ export class PaymentsController {
     const user = request.user as RequestUser;
     if (!user) {
       throw new Error('User not found in request');
+    }
+
+    // Validate request body
+    if (!body.paymentId || !body.deviceId || !body.releaseReason) {
+      throw new BadRequestException(
+        'Missing required fields: paymentId, deviceId, and releaseReason are required.',
+      );
     }
 
     return this.paymentsService.releaseEscrow(
