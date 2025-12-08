@@ -126,6 +126,9 @@ export class PaymentsService {
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000';
     
+    // Prepare Paynet 3D Secure payment request with card information
+    // According to Paynet docs: card info is required when not using saved card
+    // Reference: https://doc.paynet.com.tr/oedeme-metotlari/api-entegrasyonu/3d-ile-odeme
     const paynetResponse = await this.paynetProvider.initiate3DPayment({
       amount: dto.totalAmount,
       reference_no: paymentId, // Use generated payment ID as reference_no
@@ -133,6 +136,12 @@ export class PaymentsService {
       domain: new URL(backendUrl).hostname,
       is_escrow: true,
       description: `Payment for device ${device.model}`,
+      // Card information - Required for Paynet 3D Secure payment
+      pan: dto.pan, // Card number
+      month: dto.month, // Expiration month (MM format)
+      year: dto.year, // Expiration year (YY or YYYY format)
+      cvc: dto.cvc, // CVV/CVC code
+      card_holder: dto.cardHolder, // Card holder name
     });
 
     // 9. Return payment info

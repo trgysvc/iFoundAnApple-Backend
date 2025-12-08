@@ -24,7 +24,7 @@ export class PaymentsController {
 
   @ApiOperation({ 
     summary: 'Process payment with Paynet',
-    description: 'Backend initiates Paynet 3D Secure payment. Creates payment record in database and returns payment URL for 3D Secure verification. Device must exist and be in "payment_pending" status.',
+    description: 'Backend initiates Paynet 3D Secure payment. Creates payment record in database and returns payment URL for 3D Secure verification. Device must exist and be in "payment_pending" status. Card information (pan, cvc, month, year, cardHolder) is required for Paynet 3D Secure payment.',
   })
   @ApiResponse({
     status: 201,
