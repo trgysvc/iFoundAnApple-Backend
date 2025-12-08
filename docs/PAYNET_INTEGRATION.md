@@ -56,15 +56,18 @@ Bu dokümantasyon, PAYNET ödeme sürecinin Backend ve iOS platformlarında nas�
 ### Authentication
 
 - **Format**: HTTP Basic Authentication
-- **Header**: `Authorization: Basic base64(secret_key:)`
+- **Header**: `Authorization: Basic <SecretKey>` (secret key direkt kullanılır, base64 encode edilmez)
 - **Secret Key**: PAYNET yönetim panelinden alınır
 - **Kaynak**: [PAYNET Authentication](https://doc.paynet.com.tr/authentication)
 
 **Örnek:**
 ```javascript
 const secretKey = 'your_secret_key';
-const authHeader = `Basic ${Buffer.from(`${secretKey}:`).toString('base64')}`;
+// PAYNET secret key direkt kullanılır, base64 encode edilmez
+const authHeader = `Basic ${secretKey}`;
 ```
+
+**Önemli Not:** Paynet API'si secret key'i direkt kullanır. Base64 encoding yapılmamalıdır.
 
 ### 3D Secure Payment
 
@@ -1066,7 +1069,7 @@ Paynet dokümantasyonuna göre (https://doc.paynet.com.tr), ödeme sürecinde ka
 ### 1. Authentication
 
 - ✅ **HTTP Basic Authentication** implementasyonu
-- ✅ Format: `Authorization: Basic base64(secret_key:)`
+- ✅ Format: `Authorization: Basic <SecretKey>` (secret key direkt kullanılır, base64 encode edilmez)
 - ✅ Secret Key environment variable'dan alınıyor
 - ✅ Publishable Key frontend için hazır
 

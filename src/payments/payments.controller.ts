@@ -134,7 +134,9 @@ export class PaymentsController {
     try {
       // Test 1: Basic connectivity (DNS resolution, network reachability)
       const baseUrl = config.apiUrl.replace(/\/$/, '');
-      const authHeader = Buffer.from(`${secretKey}:`).toString('base64');
+      // PAYNET uses direct secret key, no base64 encoding
+      // Format: Authorization: Basic <SecretKey>
+      const authHeader = secretKey;
       
       // Try to reach base URL (may return 404, but that's OK - means server is reachable)
       try {
@@ -173,8 +175,8 @@ export class PaymentsController {
       testResults.push({
         test: 'Authentication Format',
         success: true,
-        message: 'Using HTTP Basic Authentication (PAYNET standard)',
-        authHeader: `Basic ${authHeader.substring(0, 20)}...`,
+        message: 'Using HTTP Basic Authentication with direct secret key (PAYNET standard)',
+        authHeader: `Basic ${authHeader.substring(0, 10)}...`,
       });
 
       // Test 3: Configuration validation

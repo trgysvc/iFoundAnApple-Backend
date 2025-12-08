@@ -224,13 +224,12 @@ export class PaynetProvider {
 
       // PAYNET uses HTTP Basic Authentication
       // According to PAYNET docs: Authorization: Basic [Secret Key]
-      // Format: Authorization: Basic base64(secret_key:)
-      // Note: Standard Basic Auth format requires base64 encoding of "username:password"
-      // For PAYNET, secret_key is used as username with empty password
-      const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
+      // Format: Authorization: Basic <SecretKey> (directly, no base64 encoding)
+      // Reference: https://doc.paynet.com.tr
+      const authHeader = this.config.secretKey;
       
-      // Debug: Log auth header prefix (first 30 chars) for verification
-      this.logger.debug(`Authorization header prefix: Basic ${authHeader.substring(0, 30)}...`);
+      // Debug: Log auth header prefix (first 10 chars) for verification
+      this.logger.debug(`Authorization header: Basic ${authHeader.substring(0, 10)}...`);
       
       // Execute with retry logic - Paynet supports retrying with same reference_no
       // According to Paynet docs: if connection timeout occurs, retry with same reference_no
@@ -243,7 +242,7 @@ export class PaynetProvider {
               request,
               {
                 headers: {
-                  'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with base64(secret_key:)
+                  'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with direct secret key
                   'Content-Type': 'application/json',
                 },
                 timeout: this.requestTimeout, // 30 seconds timeout
@@ -300,7 +299,9 @@ export class PaynetProvider {
       this.logger.log(`Completing 3D payment: session_id=${request.session_id}`);
 
       // PAYNET uses HTTP Basic Authentication with secret_key
-      const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
+      // Format: Authorization: Basic <SecretKey> (directly, no base64 encoding)
+      // Reference: https://doc.paynet.com.tr
+      const authHeader = this.config.secretKey;
       
       const response = await this.executeWithRetry<{ data: PaynetPaymentResponse }>(
         () =>
@@ -310,7 +311,7 @@ export class PaynetProvider {
               request,
               {
                 headers: {
-                  'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth
+                  'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with direct secret key
                   'Content-Type': 'application/json',
                 },
                 timeout: this.requestTimeout, // 30 seconds timeout
@@ -403,7 +404,9 @@ export class PaynetProvider {
       
       this.logger.log(`Releasing escrow payment: xact_id=${xactId}`);
 
-      const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
+      // PAYNET uses HTTP Basic Authentication with secret_key
+      // Format: Authorization: Basic <SecretKey> (directly, no base64 encoding)
+      const authHeader = this.config.secretKey;
       
       const requestBody: {
         xact_id: string;
@@ -475,7 +478,9 @@ export class PaynetProvider {
       
       this.logger.log(`Rejecting escrow payment: xact_id=${xactId}`);
 
-      const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
+      // PAYNET uses HTTP Basic Authentication with secret_key
+      // Format: Authorization: Basic <SecretKey> (directly, no base64 encoding)
+      const authHeader = this.config.secretKey;
       
       const requestBody: {
         xact_id: string;
@@ -542,14 +547,16 @@ export class PaynetProvider {
       const endpoint = `${baseUrl}/v1/transaction/${xactId}`; // v1 veya v2 olabilir, dokümantasyondan doğrulanacak
       
       // PAYNET uses HTTP Basic Authentication with secret_key
-      const authHeader = Buffer.from(`${this.config.secretKey}:`).toString('base64');
+      // Format: Authorization: Basic <SecretKey> (directly, no base64 encoding)
+      // Reference: https://doc.paynet.com.tr
+      const authHeader = this.config.secretKey;
       
       const response = await this.executeWithRetry<{ data: any }>(
         () =>
           firstValueFrom(
             this.httpService.get(endpoint, {
               headers: {
-                'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth
+                'Authorization': `Basic ${authHeader}`, // PAYNET uses Basic Auth with direct secret key
               },
               timeout: this.requestTimeout, // 30 seconds timeout
             }),

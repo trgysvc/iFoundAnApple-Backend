@@ -1520,7 +1520,8 @@ interface Paynet3DPaymentRequest {
 
 **Örnek API Çağrısı:**
 ```typescript
-const authHeader = Buffer.from(`${secretKey}:`).toString('base64');
+// PAYNET secret key direkt kullanılır, base64 encode edilmez
+const authHeader = secretKey;
 
 const response = await fetch('https://api.paynet.com.tr/v2/transaction/tds_initial', {
   method: 'POST',
@@ -1657,7 +1658,8 @@ interface PaynetEscrowStatusUpdateRequest {
 
 **Örnek API Çağrısı:**
 ```typescript
-const authHeader = Buffer.from(`${secretKey}:`).toString('base64');
+// PAYNET secret key direkt kullanılır, base64 encode edilmez
+const authHeader = secretKey;
 
 const releaseResponse = await fetch('https://api.paynet.com.tr/v1/transaction/escrow_status_update', {
   method: 'POST',
