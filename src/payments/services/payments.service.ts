@@ -86,7 +86,50 @@ export class PaymentsService {
       dto.totalAmount,
     );
 
-    // 5. Find matched finder user_id
+    // 5. Check for existing pending payment for this device
+    const existingPendingPayment = await this.checkPendingPaymentForDevice(
+      dto.deviceId,
+      payerUserId,
+    );
+
+    if (existingPendingPayment.exists && existingPendingPayment.paymentId) {
+      if (!existingPendingPayment.createdAt) {
+        // Eğer createdAt yoksa, güvenli tarafta kal ve eski kaydı iptal et
+        this.logger.warn(
+          `Pending payment found but createdAt is missing: ${existingPendingPayment.paymentId}. Cancelling it.`,
+        );
+        await this.cancelPendingPayment(
+          existingPendingPayment.paymentId,
+          payerUserId,
+          'Yeni ödeme denemesi için iptal edildi',
+        );
+      } else {
+        const paymentAgeMinutes =
+          (Date.now() -
+            new Date(existingPendingPayment.createdAt).getTime()) /
+          60000;
+
+        if (paymentAgeMinutes < 5) {
+          // Çok yeni pending payment varsa hata döndür
+          const remainingMinutes = Math.ceil(5 - paymentAgeMinutes);
+          throw new BadRequestException(
+            `Bu cihaz için zaten devam eden bir ödeme işlemi var. Lütfen ${remainingMinutes} dakika bekleyin veya önceki ödemeyi tamamlayın.`,
+          );
+        } else {
+          // 5 dakikadan eski pending payment varsa failed olarak işaretle
+          this.logger.log(
+            `Eski pending payment iptal ediliyor: ${existingPendingPayment.paymentId} (${paymentAgeMinutes.toFixed(1)} dakika eski)`,
+          );
+          await this.cancelPendingPayment(
+            existingPendingPayment.paymentId,
+            payerUserId,
+            'Yeni ödeme denemesi için iptal edildi',
+          );
+        }
+      }
+    }
+
+    // 6. Find matched finder user_id
     const finderUserId = await this.getMatchedFinderUserId(dto.deviceId);
     if (!finderUserId) {
       throw new BadRequestException(
@@ -94,10 +137,10 @@ export class PaymentsService {
       );
     }
 
-    // 6. Generate payment ID (UUID) - this will be used as reference_no in Paynet
+    // 7. Generate payment ID (UUID) - this will be used as reference_no in Paynet
     const paymentId = randomUUID();
 
-    // 7. Create payment record in database with 'pending' status
+    // 8. Create payment record in database with 'pending' status
     const { error: paymentError } = await this.supabase.from('payments').insert({
       id: paymentId,
       device_id: dto.deviceId,
@@ -122,7 +165,7 @@ export class PaymentsService {
 
     this.logger.log(`Payment record created: ${paymentId} with status 'pending'`);
 
-    // 8. Initiate 3D Secure payment with PAYNET
+    // 9. Initiate 3D Secure payment with PAYNET
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
     const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000';
     
@@ -144,7 +187,7 @@ export class PaymentsService {
       card_holder: dto.cardHolder, // Card holder name
     });
 
-    // 9. Return payment info
+    // 10. Return payment info
     return {
       id: paymentId,
       deviceId: dto.deviceId,
@@ -639,6 +682,133 @@ export class PaymentsService {
       this.logger.error(`Error updating database after escrow release: ${error.message}`, error.stack);
       throw error;
     }
+  }
+
+  /**
+   * Check for existing pending payment for a device
+   * Returns information about pending payment if exists
+   */
+  async checkPendingPaymentForDevice(
+    deviceId: string,
+    userId: string,
+  ): Promise<{
+    exists: boolean;
+    paymentId?: string;
+    createdAt?: string;
+    canRetry: boolean;
+  }> {
+    this.logger.log(
+      `Checking for pending payment: deviceId=${deviceId}, userId=${userId}`,
+    );
+
+    // Find pending payment for this device and user
+    const { data: pendingPayment, error } = await this.supabase
+      .from('payments')
+      .select('id, created_at, payment_status')
+      .eq('device_id', deviceId)
+      .eq('payer_id', userId)
+      .eq('payment_status', 'pending')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (error) {
+      this.logger.error(
+        `Error checking pending payment: ${error.message}`,
+        error,
+      );
+      // Don't throw - return exists: false to allow payment to proceed
+      return { exists: false, canRetry: false };
+    }
+
+    if (!pendingPayment) {
+      return { exists: false, canRetry: false };
+    }
+
+    const paymentAgeMinutes =
+      (Date.now() - new Date(pendingPayment.created_at).getTime()) / 60000;
+    const canRetry = paymentAgeMinutes >= 5; // 5 dakikadan eski ise retry edilebilir
+
+    return {
+      exists: true,
+      paymentId: pendingPayment.id,
+      createdAt: pendingPayment.created_at,
+      canRetry,
+    };
+  }
+
+  /**
+   * Cancel a pending payment
+   * Marks payment as failed with a reason
+   */
+  async cancelPendingPayment(
+    paymentId: string,
+    userId: string,
+    reason: string = 'Yeni ödeme denemesi için iptal edildi',
+  ): Promise<{ success: boolean; message: string }> {
+    this.logger.log(`Cancelling pending payment: paymentId=${paymentId}`);
+
+    // Get payment record to validate ownership
+    const { data: payment, error: paymentError } = await this.supabase
+      .from('payments')
+      .select('id, payer_id, payment_status')
+      .eq('id', paymentId)
+      .single();
+
+    if (paymentError || !payment) {
+      this.logger.error(
+        `Payment not found for cancellation: ${paymentId}`,
+        paymentError,
+      );
+      throw new NotFoundException(
+        `Payment not found: ${paymentId}. Cannot cancel non-existent payment.`,
+      );
+    }
+
+    // Validate payment ownership
+    if (payment.payer_id !== userId) {
+      this.logger.warn(
+        `User ${userId} attempted to cancel payment ${paymentId} that doesn't belong to them`,
+      );
+      throw new BadRequestException(
+        'Payment does not belong to this user',
+      );
+    }
+
+    // Validate payment status - only pending payments can be cancelled
+    if (payment.payment_status !== 'pending') {
+      throw new BadRequestException(
+        `Payment is not in 'pending' status. Current status: ${payment.payment_status}. Only pending payments can be cancelled.`,
+      );
+    }
+
+    // Update payment status to failed
+    const { error: updateError } = await this.supabase
+      .from('payments')
+      .update({
+        payment_status: 'failed',
+        failed_reason: reason,
+        failed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', paymentId);
+
+    if (updateError) {
+      this.logger.error(
+        `Failed to cancel payment: ${updateError.message}`,
+        updateError,
+      );
+      throw new BadRequestException(
+        `Failed to cancel payment: ${updateError.message}`,
+      );
+    }
+
+    this.logger.log(`Payment cancelled successfully: ${paymentId}`);
+
+    return {
+      success: true,
+      message: 'Pending payment cancelled successfully',
+    };
   }
 
 }

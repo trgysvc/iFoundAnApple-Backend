@@ -357,4 +357,84 @@ export class PaymentsController {
       user.id,
     );
   }
+
+  @ApiOperation({
+    summary: 'Check for pending payment for a device',
+    description: 'Check if there is an existing pending payment for a specific device. Frontend can use this to inform users about ongoing payment attempts.',
+  })
+  @ApiParam({
+    name: 'deviceId',
+    description: 'Device ID (UUID)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Pending payment check result',
+    schema: {
+      type: 'object',
+      properties: {
+        exists: { type: 'boolean', example: true },
+        paymentId: { type: 'string', example: '123e4567-e89b-12d3-a456-426614174000' },
+        createdAt: { type: 'string', example: '2025-01-15T10:30:00Z' },
+        canRetry: { type: 'boolean', example: true },
+      },
+    },
+  })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @Get('device/:deviceId/pending')
+  async getPendingPaymentForDevice(
+    @Param('deviceId') deviceId: string,
+    @Req() request: Request,
+  ): Promise<{
+    exists: boolean;
+    paymentId?: string;
+    createdAt?: string;
+    canRetry: boolean;
+  }> {
+    const user = request.user as RequestUser;
+    if (!user) {
+      throw new Error('User not found in request');
+    }
+
+    return this.paymentsService.checkPendingPaymentForDevice(deviceId, user.id);
+  }
+
+  @ApiOperation({
+    summary: 'Cancel a pending payment',
+    description: 'Cancel an existing pending payment. This marks the payment as failed with a reason. Only pending payments can be cancelled.',
+  })
+  @ApiParam({
+    name: 'paymentId',
+    description: 'Payment ID (UUID)',
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Payment cancelled successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean', example: true },
+        message: { type: 'string', example: 'Pending payment cancelled successfully' },
+      },
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid request, payment not in pending status, or payment does not belong to the user' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 404, description: 'Payment not found' })
+  @Post(':paymentId/cancel')
+  async cancelPendingPayment(
+    @Param('paymentId') paymentId: string,
+    @Body() body: { reason?: string },
+    @Req() request: Request,
+  ): Promise<{ success: boolean; message: string }> {
+    const user = request.user as RequestUser;
+    if (!user) {
+      throw new Error('User not found in request');
+    }
+
+    const reason = body.reason || 'Yeni ödeme denemesi için iptal edildi';
+
+    return this.paymentsService.cancelPendingPayment(paymentId, user.id, reason);
+  }
 }
