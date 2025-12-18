@@ -787,7 +787,7 @@ export class PaymentsService {
       .from('payments')
       .update({
         payment_status: 'failed',
-        failed_reason: reason,
+        failure_reason: reason,
         failed_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       })

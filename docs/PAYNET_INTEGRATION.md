@@ -860,7 +860,7 @@ Frontend/iOS, backend'den başarılı yanıt aldıktan sonra:
 1. ✅ Webhook'u doğrular
 2. ✅ **Webhook payload'ını veritabanında saklar** (hata analizi için)
 3. ✅ Webhook'tan gelen `reference_no` ile payment ID'yi eşleştirir
-4. ✅ `payments` tablosunda mevcut kaydı günceller (`status = 'failed'`, `failed_reason` vb.)
+4. ✅ `payments` tablosunda mevcut kaydı günceller (`status = 'failed'`, `failure_reason` vb.)
 5. ✅ Frontend/iOS'a bildirim gönderir
 
 **Frontend/iOS İşlemleri:**

@@ -700,7 +700,7 @@ Kart bilgileriniz güvenli şekilde şifrelenir ve saklanmaz.
 UPDATE payments 
 SET 
   payment_status = 'failed',
-  failed_reason = [webhook_error_message],
+  failure_reason = [webhook_error_message],
   failed_at = now(),
   updated_at = now()
 WHERE id = [payment_id];
