@@ -69,7 +69,17 @@ export class PaymentsService {
       );
     }
 
-    // 3. Validate device status
+    // 3. Check if device is already in payment_completed status (must be checked first)
+    if (
+      device.status === 'payment_completed' ||
+      device.status === 'PAYMENT_COMPLETED'
+    ) {
+      throw new BadRequestException(
+        `Device ${dto.deviceId} is already in 'payment_completed' status. Cannot create new payment.`,
+      );
+    }
+
+    // 3.5. Validate device status must be payment_pending
     if (
       device.status !== 'payment_pending' &&
       device.status !== 'PAYMENT_PENDING'
@@ -85,6 +95,25 @@ export class PaymentsService {
       dto.deviceId,
       dto.totalAmount,
     );
+
+    // 4.5. Check for existing completed payment for this device
+    // If a payment is already completed, prevent creating a new one
+    const { data: existingCompletedPayment } = await this.supabase
+      .from('payments')
+      .select('id, payment_status')
+      .eq('device_id', dto.deviceId)
+      .eq('payer_id', payerUserId)
+      .eq('payment_status', 'completed')
+      .maybeSingle();
+
+    if (existingCompletedPayment) {
+      this.logger.warn(
+        `User ${payerUserId} attempted to create payment for device ${dto.deviceId} that already has a completed payment: ${existingCompletedPayment.id}`,
+      );
+      throw new BadRequestException(
+        `Bu cihaz için zaten tamamlanmış bir ödeme işlemi var. Yeni ödeme oluşturulamaz.`,
+      );
+    }
 
     // 5. Check for existing pending payment for this device
     const existingPendingPayment = await this.checkPendingPaymentForDevice(
