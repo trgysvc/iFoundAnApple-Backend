@@ -1,9 +1,10 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Post, Req, Res } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags, ApiParam } from '@nestjs/swagger';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { firstValueFrom } from 'rxjs';
 import { RequestUser } from '../auth/interfaces/request-user.interface';
+import { Public } from '../auth/decorators/public.decorator';
 import { ProcessPaymentDto } from './dto/process-payment.dto';
 import { PaymentResponseDto } from './dto/payment-response.dto';
 import { Complete3DPaymentDto } from './dto/complete-3d-payment.dto';
@@ -78,6 +79,34 @@ export class PaymentsController {
     }
 
     return this.paymentsService.complete3DPayment(dto, user.id);
+  }
+
+  @ApiOperation({
+    summary: 'Paynet return_url callback handler',
+    description: 'Handles Paynet return_url callback after 3D Secure verification. This endpoint is public and receives session_id and token_id from Paynet. Redirects user to frontend processing page.',
+  })
+  @ApiResponse({ status: 302, description: 'Redirects to frontend processing page' })
+  @Public() // Paynet'ten geldiği için public olmalı
+  @Post('callback')
+  async handlePaynetCallback(
+    @Body() body: { session_id?: string; token_id?: string },
+    @Res() res: Response,
+  ): Promise<void> {
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    
+    // Paynet'ten gelen session_id ve token_id'yi al
+    const sessionId = body.session_id;
+    const tokenId = body.token_id;
+
+    if (!sessionId || !tokenId) {
+      // Frontend'e error sayfasına yönlendir
+      return res.redirect(`${frontendUrl}/payment/error?reason=missing_params`);
+    }
+
+    // Frontend'e processing sayfasına yönlendir
+    // Frontend burada polling yaparak sonucu kontrol edebilir
+    // session_id ve token_id query parametreleri olarak gönderilir
+    return res.redirect(`${frontendUrl}/payment/processing?session_id=${encodeURIComponent(sessionId)}&token_id=${encodeURIComponent(tokenId)}`);
   }
 
   @ApiOperation({ summary: 'Test PAYNET API connection and configuration' })

@@ -27,6 +27,7 @@ interface Paynet3DPaymentRequest {
   amount: number; // Çekilecek tutar
   reference_no: string; // İşleme ait benzersiz referans numarası (order_id)
   return_url: string; // 3D doğrulama sonucunun post edileceği URL - ZORUNLU
+  confirmation_url?: string; // Ödeme işlemi tamamlandığında webhook gönderilecek URL - OPSİYONEL ama önerilir
   domain: string; // İşlemin yapıldığı uygulamanın domain bilgisi - ZORUNLU
   is_escrow?: boolean; // PAYNET escrow özelliği - ödeme ana firma onayına tabi olur
   // Kart bilgileri (saklı kart kullanılmıyorsa zorunlu)

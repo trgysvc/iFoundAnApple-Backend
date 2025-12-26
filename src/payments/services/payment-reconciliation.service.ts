@@ -198,5 +198,125 @@ export class PaymentReconciliationService {
       );
     }
   }
+
+  /**
+   * Check for stale pending payments and mark them as failed
+   * If a payment has been pending for more than 3 minutes without webhook or complete-3d call,
+   * mark it as failed to prevent infinite pending state
+   * 
+   * Based on Paynet documentation:
+   * - If connection timeout occurs, retry with same reference_no
+   * - System will return previous successful transaction if exists
+   * - But if user never completes 3D Secure, payment stays pending forever
+   * - 3D Secure işlemi genellikle 30 saniye - 3 dakika arasında tamamlanır
+   * 
+   * Reference: https://doc.paynet.com.tr/oedeme-metotlari/api-entegrasyonu/3d-ile-odeme
+   */
+  @Cron(CronExpression.EVERY_MINUTE) // Her 1 dakikada bir kontrol et
+  async checkStalePendingPayments(): Promise<void> {
+    this.logger.debug('Checking for stale pending payments...');
+
+    try {
+      const staleThresholdMinutes = 3; // 3 dakika - 3D Secure işlemi için makul süre
+      const staleThreshold = new Date(Date.now() - staleThresholdMinutes * 60 * 1000);
+
+      // Find pending payments older than threshold
+      const { data: stalePayments, error } = await this.supabase
+        .from('payments')
+        .select('id, device_id, payer_id, created_at')
+        .eq('payment_status', 'pending')
+        .lt('created_at', staleThreshold.toISOString())
+        .limit(50); // Process max 50 at a time
+
+      if (error) {
+        this.logger.error(`Failed to fetch stale payments: ${error.message}`, error);
+        return;
+      }
+
+      if (!stalePayments || stalePayments.length === 0) {
+        return; // No stale payments
+      }
+
+      this.logger.log(`Found ${stalePayments.length} stale pending payments`);
+
+      for (const payment of stalePayments) {
+        try {
+          // Check if webhook exists for this payment
+          const { data: webhook } = await this.supabase
+            .from('webhook_storage')
+            .select('id')
+            .eq('reference_no', payment.id)
+            .maybeSingle();
+
+          if (webhook) {
+            // Webhook exists but not processed - skip, reconciliation service will handle it
+            continue;
+          }
+
+          // Check if payment is at least 30 seconds old (prevent premature timeout)
+          const paymentAgeSeconds = (Date.now() - new Date(payment.created_at).getTime()) / 1000;
+          if (paymentAgeSeconds < 30) {
+            // Payment is less than 30 seconds old - too early to timeout
+            continue;
+          }
+
+          // No webhook received - mark payment as failed
+          const { error: updateError } = await this.supabase
+            .from('payments')
+            .update({
+              payment_status: 'failed',
+              failure_reason: 'Ödeme işlemi zaman aşımına uğradı. 3D Secure doğrulama tamamlanmadı veya webhook alınamadı.',
+              failed_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', payment.id);
+
+          if (updateError) {
+            this.logger.error(
+              `Failed to mark stale payment as failed: ${updateError.message}`,
+              updateError,
+            );
+            continue;
+          }
+
+          // Reset device status to payment_pending so user can retry
+          await this.supabase
+            .from('devices')
+            .update({
+              status: 'payment_pending',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', payment.device_id);
+
+          // Create audit log
+          await this.supabase.from('audit_logs').insert({
+            event_type: 'payment_timeout',
+            event_category: 'payment',
+            event_action: 'timeout',
+            event_severity: 'warning',
+            user_id: payment.payer_id,
+            resource_type: 'payment',
+            resource_id: payment.id,
+            event_description: `Payment timed out after ${staleThresholdMinutes} minutes without webhook`,
+            event_data: {
+              payment_id: payment.id,
+              device_id: payment.device_id,
+              timeout_minutes: staleThresholdMinutes,
+            },
+          });
+
+          this.logger.log(
+            `Marked stale payment ${payment.id} as failed (no webhook received after ${staleThresholdMinutes} minutes)`,
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `Error processing stale payment ${payment.id}: ${error.message}`,
+          );
+        }
+      }
+    } catch (error: any) {
+      this.logger.error(`Stale payment check error: ${error.message}`, error.stack);
+    }
+  }
 }
 

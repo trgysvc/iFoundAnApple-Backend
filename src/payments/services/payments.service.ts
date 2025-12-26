@@ -201,10 +201,13 @@ export class PaymentsService {
     // Prepare Paynet 3D Secure payment request with card information
     // According to Paynet docs: card info is required when not using saved card
     // Reference: https://doc.paynet.com.tr/oedeme-metotlari/api-entegrasyonu/3d-ile-odeme
+    // confirmation_url: Ödeme tamamlandığında webhook gönderilecek URL
+    // Reference: https://doc.paynet.com.tr/oedeme-metotlari/ortak-odeme-sayfasi/odeme-emri-olusturma/confirmation-url-adresine-post-edilen-parametreler
     const paynetResponse = await this.paynetProvider.initiate3DPayment({
       amount: dto.totalAmount,
       reference_no: paymentId, // Use generated payment ID as reference_no
-      return_url: `${frontendUrl}/payment/callback`,
+      return_url: `${backendUrl}/payments/callback`, // Backend callback URL - Paynet buraya POST eder
+      confirmation_url: `${backendUrl}/webhooks/paynet-callback`, // Backend webhook URL
       domain: new URL(backendUrl).hostname,
       is_escrow: true,
       description: `Payment for device ${device.model}`,
