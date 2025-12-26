@@ -206,8 +206,8 @@ export class PaymentsService {
     const paynetResponse = await this.paynetProvider.initiate3DPayment({
       amount: dto.totalAmount,
       reference_no: paymentId, // Use generated payment ID as reference_no
-      return_url: `${backendUrl}/payments/callback`, // Backend callback URL - Paynet buraya POST eder
-      confirmation_url: `${backendUrl}/webhooks/paynet-callback`, // Backend webhook URL
+      return_url: `${backendUrl}/v1/payments/callback`, // Backend callback URL - Paynet buraya POST eder (v1 prefix gerekli)
+      confirmation_url: `${backendUrl}/v1/webhooks/paynet-callback`, // Backend webhook URL (v1 prefix gerekli)
       domain: new URL(backendUrl).hostname,
       is_escrow: true,
       description: `Payment for device ${device.model}`,
