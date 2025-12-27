@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Req, Res } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Logger, Param, Post, Req, Res } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags, ApiParam } from '@nestjs/swagger';
 import { Request, Response } from 'express';
@@ -16,6 +16,8 @@ import { WebhooksService } from '../webhooks/webhooks.service';
 @Controller('payments')
 @ApiBearerAuth('bearer')
 export class PaymentsController {
+  private readonly logger = new Logger(PaymentsController.name);
+
   constructor(
     private readonly paymentsService: PaymentsService,
     private readonly paynetProvider: PaynetProvider,
