@@ -219,6 +219,35 @@ export class PaymentsService {
       card_holder: dto.cardHolder, // Card holder name
     });
 
+    // 9.5. Update payment record with session_id and transaction_id from Paynet
+    // This is critical for callback handler to find payment_id from session_id
+    if (paynetResponse.session_id || paynetResponse.transaction_id) {
+      const updateData: any = {};
+      if (paynetResponse.session_id) {
+        updateData.session_id = paynetResponse.session_id;
+      }
+      if (paynetResponse.transaction_id) {
+        updateData.provider_transaction_id = paynetResponse.transaction_id;
+      }
+
+      const { error: updateError } = await this.supabase
+        .from('payments')
+        .update(updateData)
+        .eq('id', paymentId);
+
+      if (updateError) {
+        this.logger.error(
+          `Failed to update payment with session_id: ${updateError.message}`,
+          updateError,
+        );
+        // Don't throw - payment record exists, session_id update is not critical
+      } else {
+        this.logger.log(
+          `Payment record updated with session_id: ${paynetResponse.session_id}`,
+        );
+      }
+    }
+
     // 10. Return payment info
     return {
       id: paymentId,
@@ -394,26 +423,55 @@ export class PaymentsService {
   /**
    * Complete 3D Secure payment after user verification
    * Called after user completes 3D Secure verification on bank's page
-   * 
-   * Backend does NOT write to database, only communicates with Paynet API
-   * Frontend/iOS will create payment records when webhook arrives
+   * Can be called from frontend or automatically from callback handler
    * 
    * Security: This endpoint validates that:
    * 1. Session ID and Token ID are provided
-   * 2. Payment ID is valid UUID format
-   * 3. Paynet API accepts the completion request
+   * 2. Payment ID exists and is in pending status
+   * 3. If userId is provided, validates payment ownership
+   * 4. Paynet API accepts the completion request
    */
   async complete3DPayment(
     dto: Complete3DPaymentDto,
-    userId: string,
+    userId?: string,
   ): Promise<{ success: boolean; paymentId: string; message: string }> {
     this.logger.log(
-      `Completing 3D payment: paymentId=${dto.paymentId}, userId=${userId}`,
+      `Completing 3D payment: paymentId=${dto.paymentId}, userId=${userId || 'system'}`,
     );
 
-    // Complete 3D payment with PAYNET
-    // Backend does NOT validate payment ownership or status from database
-    // Payment records don't exist yet - they will be created by frontend/iOS when webhook arrives
+    // 1. Validate payment exists and is in pending status
+    const { data: payment, error: paymentError } = await this.supabase
+      .from('payments')
+      .select('id, payer_id, payment_status')
+      .eq('id', dto.paymentId)
+      .single();
+
+    if (paymentError || !payment) {
+      this.logger.error(`Payment not found: ${dto.paymentId}`, paymentError);
+      throw new NotFoundException(
+        `Payment not found: ${dto.paymentId}. Please ensure the payment ID is correct.`,
+      );
+    }
+
+    // 2. Validate payment status - must be pending
+    if (payment.payment_status !== 'pending') {
+      this.logger.warn(
+        `Payment ${dto.paymentId} is not in pending status. Current status: ${payment.payment_status}`,
+      );
+      throw new BadRequestException(
+        `Payment is not in pending status. Current status: ${payment.payment_status}`,
+      );
+    }
+
+    // 3. If userId is provided, validate payment ownership
+    if (userId && payment.payer_id !== userId) {
+      this.logger.warn(
+        `User ${userId} attempted to complete payment ${dto.paymentId} that belongs to ${payment.payer_id}`,
+      );
+      throw new BadRequestException('Payment does not belong to this user');
+    }
+
+    // 4. Complete 3D payment with PAYNET
     try {
       const paynetResponse = await this.paynetProvider.complete3DPayment({
         session_id: dto.sessionId,
@@ -436,11 +494,31 @@ export class PaymentsService {
         error.stack,
       );
 
-      // Backend does NOT update database - frontend/iOS will handle error state
       throw new BadRequestException(
         `Payment completion failed: ${error.message}`,
       );
     }
+  }
+
+  /**
+   * Find payment by session_id
+   * Used by callback handler to find payment_id from Paynet session_id
+   */
+  async findPaymentBySessionId(
+    sessionId: string,
+  ): Promise<{ id: string; payment_status: string } | null> {
+    const { data: payment, error } = await this.supabase
+      .from('payments')
+      .select('id, payment_status')
+      .eq('session_id', sessionId)
+      .eq('payment_status', 'pending')
+      .single();
+
+    if (error || !payment) {
+      return null;
+    }
+
+    return payment;
   }
 
   /**

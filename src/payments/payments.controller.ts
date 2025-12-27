@@ -83,7 +83,7 @@ export class PaymentsController {
 
   @ApiOperation({
     summary: 'Paynet return_url callback handler',
-    description: 'Handles Paynet return_url callback after 3D Secure verification. This endpoint is public and receives session_id and token_id from Paynet. Redirects user to frontend processing page.',
+    description: 'Handles Paynet return_url callback after 3D Secure verification. This endpoint is public and receives session_id and token_id from Paynet. Automatically starts complete-3d process and redirects user to frontend processing page.',
   })
   @ApiResponse({ status: 302, description: 'Redirects to frontend processing page' })
   @Public() // Paynet'ten geldiği için public olmalı
@@ -103,10 +103,55 @@ export class PaymentsController {
       return res.redirect(`${frontendUrl}/payment/error?reason=missing_params`);
     }
 
-    // Frontend'e processing sayfasına yönlendir
-    // Frontend burada polling yaparak sonucu kontrol edebilir
-    // session_id ve token_id query parametreleri olarak gönderilir
-    return res.redirect(`${frontendUrl}/payment/processing?session_id=${encodeURIComponent(sessionId)}&token_id=${encodeURIComponent(tokenId)}`);
+    try {
+      // 1. Find payment_id using session_id
+      const payment = await this.paymentsService.findPaymentBySessionId(
+        sessionId,
+      );
+
+      if (!payment) {
+        this.logger.error(`Payment not found for session_id: ${sessionId}`);
+        return res.redirect(
+          `${frontendUrl}/payment/error?reason=payment_not_found`,
+        );
+      }
+
+      // 2. Automatically start complete-3d process (async, don't wait)
+      // This will send tds_charge request to Paynet
+      this.paymentsService
+        .complete3DPayment(
+          {
+            paymentId: payment.id,
+            sessionId: sessionId,
+            tokenId: tokenId,
+          },
+          undefined, // userId not needed - callback handler is system-initiated
+        )
+        .then(() => {
+          this.logger.log(
+            `Successfully initiated complete-3d for payment: ${payment.id}`,
+          );
+        })
+        .catch((error) => {
+          // Log error but don't block redirect
+          this.logger.error(
+            `Failed to complete 3D payment: ${error.message}`,
+            error.stack,
+          );
+        });
+
+      // 3. Redirect to frontend processing page
+      // Frontend will poll payment status endpoint to check webhook result
+      return res.redirect(
+        `${frontendUrl}/payment/processing?payment_id=${payment.id}&session_id=${encodeURIComponent(sessionId)}&token_id=${encodeURIComponent(tokenId)}`,
+      );
+    } catch (error: any) {
+      this.logger.error(
+        `Callback handler error: ${error.message}`,
+        error.stack,
+      );
+      return res.redirect(`${frontendUrl}/payment/error?reason=callback_failed`);
+    }
   }
 
   @ApiOperation({ summary: 'Test PAYNET API connection and configuration' })
