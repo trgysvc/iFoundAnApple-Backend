@@ -503,6 +503,22 @@ export class PaymentsService {
         }
 
         // Update payments table
+        // Provider response'u JSON olarak sakla
+        const providerResponseData = {
+          xact_id: responseData.xact_id,
+          bank_authorization_code: responseData.bank_authorization_code,
+          bank_order_id: responseData.bank_order_id,
+          bank_reference_code: responseData.bank_reference_code,
+          amount: responseData.amount,
+          net_amount: responseData.net_amount,
+          comission: responseData.comission,
+          card_no_masked: responseData.card_no_masked,
+          card_brand_name: responseData.card_brand_name,
+          card_type: responseData.card_type,
+          xact_date: responseData.xact_date,
+          bank_name: responseData.bank_name,
+        };
+
         const { error: updateError } = await this.supabase
           .from('payments')
           .update({
@@ -510,9 +526,14 @@ export class PaymentsService {
             escrow_status: 'held',
             provider_payment_id: responseData.bank_order_id,
             provider_transaction_id: responseData.xact_id,
-            authorization_code: responseData.bank_authorization_code,
+            provider_status: 'success',
+            provider_response: JSON.stringify(providerResponseData),
             completed_at: responseData.xact_date || new Date().toISOString(),
             payment_gateway_fee: responseData.comission || fullPayment.payment_gateway_fee,
+            card_last_four: responseData.card_no_masked?.slice(-4),
+            card_brand: responseData.card_brand_name,
+            gross_amount: responseData.amount,
+            net_amount: responseData.net_amount,
             updated_at: new Date().toISOString(),
           })
           .eq('id', dto.paymentId);
