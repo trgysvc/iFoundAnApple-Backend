@@ -340,12 +340,31 @@ export class PaynetProvider {
         '3D Payment Completion',
       );
 
-      if (!response.data.success) {
+      // Log full response for debugging Paynet API format
+      this.logger.debug(`PAYNET API full response: ${JSON.stringify(response.data)}`);
+
+      // Paynet may send success in different ways:
+      // 1. success: true field
+      // 2. transaction_id presence (indicates success)
+      // 3. message: "Başarılı İşlem" (indicates success) - Paynet sometimes returns success=false but message="Başarılı İşlem"
+      // 4. error field presence (indicates failure)
+      const hasSuccessField = response.data.success === true;
+      const hasSuccessIndicators = !!response.data.transaction_id;
+      const hasSuccessMessage = response.data.message === 'Başarılı İşlem' || 
+        (response.data.message && response.data.message.toLowerCase().includes('başarılı'));
+      const hasError = !!response.data.error;
+
+      // Determine if request was successful
+      const isSuccess = hasSuccessField || (hasSuccessIndicators && !hasError) || (hasSuccessMessage && !hasError);
+
+      if (!isSuccess) {
+        const errorMessage = response.data.error || response.data.message || 'Unknown error';
         this.logger.error(
-          `PAYNET 3D payment completion failed: ${response.data.error || response.data.message}`,
+          `PAYNET 3D payment completion failed: ${errorMessage}`,
         );
+        this.logger.error(`PAYNET response details: success=${response.data.success}, transaction_id=${response.data.transaction_id}, error=${response.data.error}, message=${response.data.message}`);
         throw new InternalServerErrorException(
-          `Payment completion failed: ${response.data.error || response.data.message}`,
+          `Payment completion failed: ${errorMessage}`,
         );
       }
 
