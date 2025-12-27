@@ -480,19 +480,118 @@ export class PaymentsService {
       });
 
       this.logger.log(
-        `3D payment completion initiated: paymentId=${dto.paymentId}, transactionId=${paynetResponse.transaction_id}`,
+        `3D payment completion response received: paymentId=${dto.paymentId}`,
       );
+      this.logger.debug(`Paynet response: ${JSON.stringify(paynetResponse)}`);
 
-      return {
-        success: true,
-        paymentId: dto.paymentId,
-        message: '3D Secure payment completed. Waiting for webhook confirmation.',
-      };
+      // 5. Process payment immediately if successful
+      const responseData = paynetResponse as any;
+      const isSucceed = responseData.is_succeed === true;
+      
+      if (isSucceed) {
+        this.logger.log(`Payment successful, updating database: ${dto.paymentId}`);
+        
+        // Get full payment record
+        const { data: fullPayment, error: paymentFetchError } = await this.supabase
+          .from('payments')
+          .select('*')
+          .eq('id', dto.paymentId)
+          .single();
+
+        if (paymentFetchError || !fullPayment) {
+          throw new Error(`Failed to fetch payment record: ${paymentFetchError?.message}`);
+        }
+
+        // Update payments table
+        const { error: updateError } = await this.supabase
+          .from('payments')
+          .update({
+            payment_status: 'completed',
+            escrow_status: 'held',
+            provider_payment_id: responseData.bank_order_id,
+            provider_transaction_id: responseData.xact_id,
+            authorization_code: responseData.bank_authorization_code,
+            completed_at: responseData.xact_date || new Date().toISOString(),
+            payment_gateway_fee: responseData.comission || fullPayment.payment_gateway_fee,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', dto.paymentId);
+
+        if (updateError) {
+          this.logger.error(`Failed to update payment: ${updateError.message}`, updateError);
+          throw updateError;
+        }
+
+        // Create escrow_accounts record
+        const { error: escrowError } = await this.supabase
+          .from('escrow_accounts')
+          .insert({
+            payment_id: dto.paymentId,
+            device_id: fullPayment.device_id,
+            holder_user_id: fullPayment.payer_id,
+            beneficiary_user_id: fullPayment.receiver_id,
+            total_amount: fullPayment.total_amount,
+            reward_amount: fullPayment.reward_amount,
+            service_fee: fullPayment.service_fee,
+            gateway_fee: fullPayment.payment_gateway_fee,
+            cargo_fee: fullPayment.cargo_fee,
+            net_payout: fullPayment.net_payout,
+            status: 'held',
+            escrow_type: 'standard',
+            auto_release_days: 30,
+            release_conditions: [],
+            confirmations: [],
+            currency: 'TRY',
+            held_at: new Date().toISOString(),
+          });
+
+        if (escrowError) {
+          this.logger.error(`Failed to create escrow account: ${escrowError.message}`, escrowError);
+        }
+
+        // Update device status
+        await this.supabase
+          .from('devices')
+          .update({
+            status: 'payment_completed',
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', fullPayment.device_id);
+
+        this.logger.log(`Payment processed successfully: ${dto.paymentId}`);
+
+        return {
+          success: true,
+          paymentId: dto.paymentId,
+          message: 'Payment completed successfully.',
+        };
+      } else {
+        // Payment failed
+        this.logger.warn(`Payment failed: ${dto.paymentId}`);
+        
+        await this.supabase
+          .from('payments')
+          .update({
+            payment_status: 'failed',
+            failure_reason: responseData.message || 'Payment failed',
+            failed_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', dto.paymentId);
+
+        throw new BadRequestException(
+          `Payment failed: ${responseData.message || 'Payment was not successful'}`,
+        );
+      }
     } catch (error: any) {
       this.logger.error(
         `Failed to complete 3D payment: ${error.message}`,
         error.stack,
       );
+
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
 
       throw new BadRequestException(
         `Payment completion failed: ${error.message}`,

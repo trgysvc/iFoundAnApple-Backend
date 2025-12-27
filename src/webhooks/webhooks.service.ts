@@ -227,16 +227,21 @@ export class WebhooksService {
 
     try {
       // 1. Update payments table
+      // Handle both webhook format and tds_charge response format
+      const authorizationCode = webhookPayload.authorization_code || webhookPayload.bank_authorization_code;
+      const orderId = webhookPayload.order_id || webhookPayload.bank_order_id;
+      const commission = webhookPayload.comission || webhookPayload.commission;
+      
       const { error: updateError } = await this.supabase
         .from('payments')
         .update({
           payment_status: 'completed',
           escrow_status: 'held',
-          provider_payment_id: webhookPayload.order_id,
-          provider_transaction_id: webhookPayload.reference_no,
-          authorization_code: webhookPayload.authorization_code,
+          provider_payment_id: orderId,
+          provider_transaction_id: webhookPayload.xact_id || webhookPayload.reference_no,
+          authorization_code: authorizationCode,
           completed_at: webhookPayload.xact_date || new Date().toISOString(),
-          payment_gateway_fee: webhookPayload.comission || payment.payment_gateway_fee,
+          payment_gateway_fee: commission || payment.payment_gateway_fee,
           updated_at: new Date().toISOString(),
         })
         .eq('id', paymentId);
