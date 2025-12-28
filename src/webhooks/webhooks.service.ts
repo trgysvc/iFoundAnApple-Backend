@@ -288,6 +288,45 @@ export class WebhooksService {
         throw deviceError;
       }
 
+      // 3.5. Update matched finder device status to 'payment_completed'
+      // Get owner device details first
+      const { data: ownerDevice } = await this.supabase
+        .from('devices')
+        .select('serialNumber, model')
+        .eq('id', payment.device_id)
+        .single();
+
+      if (ownerDevice) {
+        // Find and update finder device
+        const { data: finderDevice } = await this.supabase
+          .from('devices')
+          .select('id')
+          .eq('serialNumber', ownerDevice.serialNumber)
+          .eq('model', ownerDevice.model)
+          .eq('device_role', 'finder')
+          .maybeSingle();
+
+        if (finderDevice) {
+          const { error: finderDeviceError } = await this.supabase
+            .from('devices')
+            .update({
+              status: 'payment_completed',
+              updated_at: new Date().toISOString(),
+            })
+            .eq('id', finderDevice.id);
+
+          if (finderDeviceError) {
+            this.logger.error(
+              `Failed to update finder device status: ${finderDeviceError.message}`,
+              finderDeviceError,
+            );
+            // Don't throw - owner device update succeeded
+          } else {
+            this.logger.log(`Finder device status updated to payment_completed: ${finderDevice.id}`);
+          }
+        }
+      }
+
       // 4. Create audit_logs record
       const { error: auditError } = await this.supabase
         .from('audit_logs')

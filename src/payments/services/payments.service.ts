@@ -579,6 +579,113 @@ export class PaymentsService {
           })
           .eq('id', fullPayment.device_id);
 
+        // Update matched finder device status to 'payment_completed'
+        const { data: ownerDevice } = await this.supabase
+          .from('devices')
+          .select('serialNumber, model')
+          .eq('id', fullPayment.device_id)
+          .single();
+
+        if (ownerDevice) {
+          const { data: finderDevice } = await this.supabase
+            .from('devices')
+            .select('id')
+            .eq('serialNumber', ownerDevice.serialNumber)
+            .eq('model', ownerDevice.model)
+            .eq('device_role', 'finder')
+            .maybeSingle();
+
+          if (finderDevice) {
+            await this.supabase
+              .from('devices')
+              .update({
+                status: 'payment_completed',
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', finderDevice.id);
+
+            this.logger.log(`Finder device status updated to payment_completed: ${finderDevice.id}`);
+          }
+        }
+
+        // Create audit log for payment completion
+        const { error: auditError } = await this.supabase
+          .from('audit_logs')
+          .insert({
+            event_type: 'payment_completed',
+            event_category: 'payment',
+            event_action: 'complete',
+            event_severity: 'info',
+            user_id: fullPayment.payer_id,
+            resource_type: 'payment',
+            resource_id: dto.paymentId,
+            event_description: 'Payment completed successfully via 3D Secure',
+            event_data: {
+              amount: fullPayment.total_amount,
+              provider: 'paynet',
+              transaction_id: responseData.xact_id,
+              authorization_code: responseData.bank_authorization_code,
+              order_id: responseData.bank_order_id,
+              device_id: fullPayment.device_id,
+            },
+          });
+
+        if (auditError) {
+          this.logger.error(
+            `Failed to create audit log: ${auditError.message}`,
+            auditError,
+          );
+          // Don't throw - audit logs are not critical for payment flow
+        }
+
+        // Create notification for owner (payer)
+        const { error: ownerNotifError } = await this.supabase
+          .from('notifications')
+          .insert({
+            user_id: fullPayment.payer_id,
+            message_key: 'payment_completed_owner',
+            type: 'success',
+            is_read: false,
+            metadata: {
+              payment_id: dto.paymentId,
+              device_id: fullPayment.device_id,
+              amount: fullPayment.total_amount,
+            },
+          });
+
+        if (ownerNotifError) {
+          this.logger.error(
+            `Failed to create owner notification: ${ownerNotifError.message}`,
+            ownerNotifError,
+          );
+          // Don't throw - notifications are not critical for payment flow
+        }
+
+        // Create notification for finder (receiver)
+        if (fullPayment.receiver_id) {
+          const { error: finderNotifError } = await this.supabase
+            .from('notifications')
+            .insert({
+              user_id: fullPayment.receiver_id,
+              message_key: 'payment_received_finder',
+              type: 'payment_success',
+              is_read: false,
+              metadata: {
+                payment_id: dto.paymentId,
+                device_id: fullPayment.device_id,
+                reward_amount: fullPayment.reward_amount,
+              },
+            });
+
+          if (finderNotifError) {
+            this.logger.error(
+              `Failed to create finder notification: ${finderNotifError.message}`,
+              finderNotifError,
+            );
+            // Don't throw - notifications are not critical for payment flow
+          }
+        }
+
         this.logger.log(`Payment processed successfully: ${dto.paymentId}`);
 
         return {
