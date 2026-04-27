@@ -11,6 +11,8 @@ import { HealthModule } from './health/health.module';
 import { SupabaseModule } from './supabase/supabase.module';
 import { PaymentsModule } from './payments/payments.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
+import { ScheduleModule } from '@nestjs/schedule';
+import { MaintenanceModule } from './maintenance/maintenance.module';
 
 @Module({
   imports: [
@@ -24,6 +26,8 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     HealthModule,
     PaymentsModule,
     WebhooksModule,
+    ScheduleModule.forRoot(),
+    MaintenanceModule,
   ],
   controllers: [AppController],
   providers: [
