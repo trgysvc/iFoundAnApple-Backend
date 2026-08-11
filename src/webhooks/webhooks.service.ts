@@ -234,7 +234,9 @@ export class WebhooksService {
           escrow_status: 'held',
           provider_payment_id: webhookPayload.order_id,
           provider_transaction_id: webhookPayload.reference_no,
-          authorization_code: webhookPayload.authorization_code,
+          // 'authorization_code' is not its own column - PAYNET's raw callback
+          // fields are kept here instead so they aren't silently dropped.
+          provider_response: JSON.stringify(webhookPayload),
           completed_at: webhookPayload.xact_date || new Date().toISOString(),
           payment_gateway_fee: webhookPayload.comission || payment.payment_gateway_fee,
           updated_at: new Date().toISOString(),
@@ -333,6 +335,7 @@ export class WebhooksService {
       // manually in the app. We pre-create the shipment row now (with a generated
       // delivery code) so the finder immediately sees their code after payment.
       const cargoCode = this.generateCargoCode();
+      const codeExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
       const { error: cargoError } = await this.supabase
         .from('cargo_shipments')
         .insert({
@@ -345,8 +348,11 @@ export class WebhooksService {
           sender_user_id: payment.receiver_id,
           receiver_user_id: payment.payer_id,
           status: 'created',
+          cargo_status: 'pending',
           cargo_fee: payment.cargo_fee,
-          cargo_code: cargoCode,
+          code: cargoCode,
+          generated_by: payment.receiver_id,
+          expires_at: codeExpiresAt,
         });
 
       if (cargoError) {

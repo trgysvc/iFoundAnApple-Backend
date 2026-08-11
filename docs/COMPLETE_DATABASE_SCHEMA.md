@@ -98,6 +98,26 @@ Kargo şirketleri bilgilerini tutan tablo.
 ### 5. **cargo_shipments**
 Kargo gönderilerini takip eden tablo.
 
+> ⚠️ **2026-08-11 düzeltmesi:** Bu bölüm daha önce canlı Supabase şemasıyla
+> uyuşmuyordu (kolon adı `cargo_code` olarak yanlış yazılmıştı, gerçek kolon
+> `code`; ayrıca `generated_by`, `cargo_status`, `expires_at`, `used_at`
+> kolonları hiç listelenmemişti). Aşağıdaki liste PostgREST OpenAPI
+> introspection ile doğrulanmıştır (`GET {SUPABASE_URL}/rest/v1/` +
+> `Accept: application/openapi+json`, service role key ile). Ayrıca
+> **`status` kolonundaki CHECK constraint (`cargo_shipments_status_check`)
+> bozuktur** — denenen hiçbir değer (varsayılan `created` dahil) kabul
+> edilmiyor, bu yüzden bu tabloya şu ana kadar hiçbir satır eklenememiştir.
+> Düzeltme SQL'i: `docs/sql_migrations/fix_cargo_shipments_status_check.sql`
+> (Supabase SQL Editor'de elle çalıştırılmalı, servis rolü REST API'siyle
+> DDL çalıştırılamıyor).
+>
+> Ayrıca ayrı bir **`cargo_codes` tablosu canlı veritabanında mevcut değil**
+> (bu dosyanın başka bir yerinde belgelenmiş olsa da) — `devices.cargo_code_id`
+> hiçbir tabloya gerçekte referans vermeyen, kullanılmayan bir kolondur.
+> Teslim kodu mekanizması tamamen `cargo_shipments` tablosunun kendi
+> `code`/`generated_by`/`expires_at`/`used_at`/`cargo_status` kolonlarında
+> yaşar.
+
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|
 | id | uuid | NO | gen_random_uuid() | Primary key |
@@ -113,7 +133,7 @@ Kargo gönderilerini takip eden tablo.
 | receiver_user_id | uuid | NO | null | Receiver user ID (FK) |
 | sender_address_encrypted | text | YES | null | Sender address (encrypted) |
 | receiver_address_encrypted | text | YES | null | Receiver address (encrypted) |
-| status | character varying(30) | NO | 'created'::character varying | Shipment status |
+| status | character varying(30) | NO | 'created'::character varying | Shipment status (⚠️ CHECK constraint currently broken, see note above) |
 | created_at | timestamp with time zone | YES | now() | Created timestamp |
 | updated_at | timestamp with time zone | YES | now() | Updated timestamp |
 | picked_up_at | timestamp with time zone | YES | null | Picked up timestamp |
@@ -129,8 +149,12 @@ Kargo gönderilerini takip eden tablo.
 | special_instructions | text | YES | null | Special instructions |
 | notes | text | YES | null | Notes |
 | failure_reason | text | YES | null | Failure reason |
-| cargo_code | character varying(20) | YES | null | Cargo code |
+| code | character varying(20) | YES | null | Kargo firmasına verilen teslim kodu (**doğru kolon adı `code`, `cargo_code` DEĞİL**) |
 | delivery_confirmation_id | uuid | YES | null | Delivery confirmation ID (FK) |
+| generated_by | uuid | YES | null | Bulan kişi (finder) ID'si — kodu kimin adına ürettiğimiz |
+| cargo_status | character varying(20) | YES | 'pending' | Basitleştirilmiş kod durumu: pending, picked_up, in_transit, delivered, confirmed (status kolonundan bağımsız, paralel bir alan) |
+| expires_at | timestamp with time zone | YES | null | Teslim kodu 7 gün sonra expire olur |
+| used_at | timestamp with time zone | YES | null | Kargo kodunun kullanıldığı veya işlemin tamamlandığı zaman damgası |
 
 ### 6. **delivery_confirmations**
 Teslimat onaylarını tutan tablo.
@@ -440,6 +464,13 @@ Kullanıcı bildirimlerini tutan tablo.
 
 ### 17. **payments**
 Ödeme işlemlerini tutan tablo.
+
+> ⚠️ **2026-08-11 not:** Bu tabloda **`authorization_code` diye bir kolon
+> yoktur**. `webhooks.service.ts` bu kolona yazmaya çalışıyordu ve her
+> PAYNET webhook'unda `PGRST204` hatasıyla ödeme tamamlama işlemini komple
+> düşürüyordu (escrow/kargo hiçbiri oluşmuyordu). Bankadan dönen yetkilendirme
+> kodu artık `provider_response` (JSON string) içine, ham webhook payload'ının
+> parçası olarak yazılıyor.
 
 | Column | Type | Nullable | Default | Description |
 |--------|------|----------|---------|-------------|

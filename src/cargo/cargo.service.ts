@@ -31,7 +31,7 @@ export class CargoService {
     const { data: shipments, error } = await this.supabase
       .from('cargo_shipments')
       .select(
-        'id, device_id, payment_id, cargo_company, tracking_number, status, cargo_code, cargo_fee, created_at, updated_at, picked_up_at, delivered_at',
+        'id, device_id, payment_id, cargo_company, tracking_number, status, cargo_status, code, cargo_fee, created_at, updated_at, picked_up_at, delivered_at',
       )
       .order('created_at', { ascending: false })
       .limit(200);
@@ -87,7 +87,9 @@ export class CargoService {
         cargo_company: dto.cargoCompany,
         tracking_number: dto.trackingNumber,
         status: 'picked_up',
+        cargo_status: 'picked_up',
         picked_up_at: now,
+        used_at: now,
         updated_at: now,
       })
       .eq('id', shipment.id);
@@ -133,7 +135,7 @@ export class CargoService {
 
     const { error: shipmentError } = await this.supabase
       .from('cargo_shipments')
-      .update({ status: 'delivered', delivered_at: now, updated_at: now })
+      .update({ status: 'delivered', cargo_status: 'delivered', delivered_at: now, updated_at: now })
       .eq('device_id', deviceId);
 
     if (shipmentError) {
