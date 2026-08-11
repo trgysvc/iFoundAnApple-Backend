@@ -327,6 +327,50 @@ export class WebhooksService {
         }
       }
 
+      // 3.6. Create cargo_shipments record
+      // No real cargo carrier integration exists yet: the finder ships the device
+      // through a carrier of their own choosing and enters the tracking number
+      // manually in the app. We pre-create the shipment row now (with a generated
+      // delivery code) so the finder immediately sees their code after payment.
+      const cargoCode = this.generateCargoCode();
+      const { error: cargoError } = await this.supabase
+        .from('cargo_shipments')
+        .insert({
+          device_id: payment.device_id,
+          payment_id: paymentId,
+          cargo_company: 'pending',
+          cargo_service_type: 'standard',
+          sender_anonymous_id: this.generateAnonymousId('FND'),
+          receiver_anonymous_id: this.generateAnonymousId('OWN'),
+          sender_user_id: payment.receiver_id,
+          receiver_user_id: payment.payer_id,
+          status: 'created',
+          cargo_fee: payment.cargo_fee,
+          cargo_code: cargoCode,
+        });
+
+      if (cargoError) {
+        this.logger.error(`Failed to create cargo shipment: ${cargoError.message}`, cargoError);
+        // Don't throw - the finder can still be helped manually if this fails
+      } else if (payment.receiver_id) {
+        const { error: cargoNotifError } = await this.supabase
+          .from('notifications')
+          .insert({
+            user_id: payment.receiver_id,
+            message_key: 'delivery_code_ready',
+            type: 'info',
+            is_read: false,
+            link: `device/${payment.device_id}`,
+          });
+
+        if (cargoNotifError) {
+          this.logger.error(
+            `Failed to create delivery code notification: ${cargoNotifError.message}`,
+            cargoNotifError,
+          );
+        }
+      }
+
       // 4. Create audit_logs record
       const { error: auditError } = await this.supabase
         .from('audit_logs')
@@ -544,5 +588,27 @@ export class WebhooksService {
     return webhook !== null;
   }
 
+  /**
+   * Generate a short human-readable delivery code for the finder.
+   * No real cargo carrier is integrated yet: this code identifies the
+   * anonymous shipment until ops enters a real tracking number.
+   */
+  private generateCargoCode(): string {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no O/0/I/1 ambiguity
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `IFA-${code}`;
+  }
+
+  /**
+   * Generate an anonymous identifier for a cargo shipment party so the
+   * finder and owner never see each other's real identity.
+   */
+  private generateAnonymousId(prefix: string): string {
+    const suffix = Math.random().toString(36).substring(2, 8).toUpperCase();
+    return `${prefix}-${suffix}`;
+  }
 }
 

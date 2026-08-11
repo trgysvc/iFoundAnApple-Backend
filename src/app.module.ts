@@ -13,6 +13,7 @@ import { PaymentsModule } from './payments/payments.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { MaintenanceModule } from './maintenance/maintenance.module';
+import { CargoModule } from './cargo/cargo.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { MaintenanceModule } from './maintenance/maintenance.module';
     WebhooksModule,
     ScheduleModule.forRoot(),
     MaintenanceModule,
+    CargoModule,
   ],
   controllers: [AppController],
   providers: [
