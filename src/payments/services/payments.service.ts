@@ -900,6 +900,184 @@ export class PaymentsService {
   }
 
   /**
+   * Cancel a payment before the device has shipped and refund the held
+   * escrow amount to the payer. Only valid while cargo hasn't been picked
+   * up yet — cargo.service.ts enforces that precondition before calling
+   * this; this method only knows about the payment/escrow side.
+   */
+  async cancelPaymentBeforeShipment(
+    paymentId: string,
+    deviceId: string,
+    cancelReason: string,
+    userId: string,
+  ): Promise<{ success: boolean; message: string }> {
+    this.logger.log(
+      `Cancelling payment before shipment: paymentId=${paymentId}, deviceId=${deviceId}, userId=${userId}`,
+    );
+
+    const { data: payment, error: paymentError } = await this.supabase
+      .from('payments')
+      .select('*')
+      .eq('id', paymentId)
+      .single();
+
+    if (paymentError || !payment) {
+      throw new NotFoundException(
+        `Payment not found: ${paymentId}. Please provide a valid payment ID that belongs to your account.`,
+      );
+    }
+
+    if (payment.payer_id !== userId) {
+      throw new BadRequestException('Only the paying device owner can cancel this payment');
+    }
+
+    if (payment.payment_status !== 'completed' || payment.escrow_status !== 'held') {
+      throw new BadRequestException(
+        `Payment is not in a cancellable state. Status: ${payment.payment_status}, Escrow: ${payment.escrow_status}`,
+      );
+    }
+
+    const paynetTransactionId =
+      payment.provider_transaction_id || payment.provider_payment_id || paymentId;
+
+    try {
+      await this.paynetProvider.rejectEscrowPayment(paynetTransactionId, cancelReason);
+
+      this.logger.log(`Escrow rejected (refunded) successfully via Paynet: paymentId=${paymentId}`);
+
+      await this.updateDatabaseAfterEscrowRefund(payment, deviceId, cancelReason, userId);
+
+      return {
+        success: true,
+        message: 'Payment cancelled and refunded successfully',
+      };
+    } catch (error: any) {
+      this.logger.error(`Failed to cancel/refund payment: ${error.message}`, error.stack);
+
+      throw new BadRequestException(`Payment cancellation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Update database after successful escrow refund (rejection)
+   */
+  private async updateDatabaseAfterEscrowRefund(
+    payment: any,
+    deviceId: string,
+    cancelReason: string,
+    userId: string,
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    try {
+      // 1. Update escrow_accounts table
+      const { error: escrowError } = await this.supabase
+        .from('escrow_accounts')
+        .update({
+          status: 'refunded',
+          refunded_at: now,
+          notes: cancelReason,
+          updated_at: now,
+        })
+        .eq('payment_id', payment.id);
+
+      if (escrowError) {
+        this.logger.error(`Failed to update escrow account: ${escrowError.message}`, escrowError);
+        throw escrowError;
+      }
+
+      // 2. Update payments table
+      const { error: paymentError } = await this.supabase
+        .from('payments')
+        .update({
+          payment_status: 'cancelled',
+          escrow_status: 'refunded',
+          escrow_refunded_at: now,
+          updated_at: now,
+        })
+        .eq('id', payment.id);
+
+      if (paymentError) {
+        this.logger.error(`Failed to update payment: ${paymentError.message}`, paymentError);
+        throw paymentError;
+      }
+
+      // 3. Update devices table (owner's row — cargo.service.ts mirrors this
+      // onto the finder's paired row)
+      const { error: deviceError } = await this.supabase
+        .from('devices')
+        .update({
+          status: 'cancelled',
+          updated_at: now,
+        })
+        .eq('id', deviceId);
+
+      if (deviceError) {
+        this.logger.error(`Failed to update device status: ${deviceError.message}`, deviceError);
+        throw deviceError;
+      }
+
+      // 4. Create audit_logs record
+      const { error: auditError } = await this.supabase
+        .from('audit_logs')
+        .insert({
+          event_type: 'payment_cancelled',
+          event_category: 'payment',
+          event_action: 'cancel',
+          event_severity: 'info',
+          user_id: userId,
+          resource_type: 'payment',
+          resource_id: payment.id,
+          event_description: 'Payment cancelled by owner before shipment, escrow refunded',
+          event_data: {
+            payment_id: payment.id,
+            device_id: deviceId,
+            refunded_amount: payment.total_amount,
+            refunded_at: now,
+            cancel_reason: cancelReason,
+          },
+        });
+
+      if (auditError) {
+        this.logger.error(`Failed to create audit log: ${auditError.message}`, auditError);
+      }
+
+      // 5. Notifications
+      const { error: ownerNotifError } = await this.supabase
+        .from('notifications')
+        .insert({
+          user_id: payment.payer_id,
+          message_key: 'payment_cancelled_refunded',
+          type: 'info',
+          is_read: false,
+        });
+
+      if (ownerNotifError) {
+        this.logger.error(`Failed to create owner notification: ${ownerNotifError.message}`, ownerNotifError);
+      }
+
+      if (payment.receiver_id) {
+        const { error: finderNotifError } = await this.supabase
+          .from('notifications')
+          .insert({
+            user_id: payment.receiver_id,
+            message_key: 'shipment_cancelled_by_owner',
+            type: 'warning',
+            is_read: false,
+          });
+
+        if (finderNotifError) {
+          this.logger.error(`Failed to create finder notification: ${finderNotifError.message}`, finderNotifError);
+        }
+      }
+
+      this.logger.log(`Successfully updated database after escrow refund: ${payment.id}`);
+    } catch (error: any) {
+      this.logger.error(`Error updating database after escrow refund: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  /**
    * Update database after successful escrow release
    */
   private async updateDatabaseAfterEscrowRelease(

@@ -21,24 +21,27 @@ Bu dosya, platformun tüm süreç akışını detaylı olarak açıklar ve hangi
 
 ## 🔄 **DEVICE STATUS ENUM**
 
+**Not:** `EXCHANGE_PENDING` ve buna bağlı `exchangeConfirmedBy` alanı/`confirmExchange()`/`makePayment()` fonksiyonları koddan tamamen silindi (hiçbir UI bu yola hiç girmiyordu — ölü koddu). Aşağıdaki liste gerçek `types.ts`'teki enum ile birebir eşleşiyor.
+
 ```typescript
 export enum DeviceStatus {
   LOST = "lost",            // Cihaz sahibi kayıp bildirimi
   REPORTED = "reported",    // Bulan kişi buldu bildirimi  
-  MATCHED = "matched",      // Cihaz eşleşiyor
+  MATCHED = "matched",      // Cihaz eşleşiyor (bulan kişi tarafı)
   PAYMENT_PENDING = "payment_pending",   // Cihazı kaybeden ödemesini yapıyor
-  PAYMENT_COMPLETED = "payment_completed", // Ödeme emanet sisteminde bekletiliyor
-  CARGO_SHIPPED = "cargo_shipped",   // Cihazı bulan kargo firmasına kod ile teslim ediyor
-  DELIVERED = "delivered",           // Kargo firması cihazı sahibine teslim ediyor
-  CONFIRMED = "confirmed",           // Cihazın sahibi cihaz eline geçince onaylıyor
-  EXCHANGE_PENDING = "exchange_pending", // Fiziksel takas sürecinde
-  COMPLETED = "completed",           // İşlem tamamlanıyor
-  DISPUTED = "disputed",	           // İptal-iade bölümü
-   // --- Yeni Eklenen İstisnai Durumlar ---
+  PAYMENT_COMPLETE = "payment_completed", // Ödeme emanet sisteminde bekletiliyor
+  COMPLETED = "completed",           // Escrow serbest bırakıldı, işlem tamamlandı
   CANCELLED = "cancelled",       // İşlem, kargoya verilmeden taraflardan biri veya sistem tarafından iptal edildi
   RETURNED = "returned",         // Cihaz, alıcıya teslim edilemediği için göndericiye iade sürecinde/edildi
-  FAILED_DELIVERY = "failed_delivery" // Kargo firması teslimatı denedi ancak başarısız oldu (adres yanlış, alıcı yok vb.)
+  FAILED_DELIVERY = "failed_delivery", // Kargo firması teslimatı denedi ancak başarısız oldu (adres yanlış, alıcı yok vb.)
+  DISPUTED = "disputed",	           // Sahip teslim aldığı cihazla ilgili itirazda bulundu, admin çözüyor
 }
+// Not: 'cargo_shipped' | 'delivered' | 'confirmed' de gerçek devices.status
+// değerleri ama enum'a eklenmedi, kodda literal string olarak kullanılıyor:
+//   cargo_shipped -> bulan kişi kargoya teslim etti (picked_up)
+//   delivered     -> kargo firması sahibine teslim etti, ONAY BEKLENİYOR
+//   confirmed     -> sahip onayladı (veya 48s sonra sistem otomatik onayladı)
+```
 ```
 ## 📦 **KARGO STATUS ENUM**
 
@@ -126,39 +129,24 @@ security_audit_events - Güvenlik denetim olayları
 ## 🔴 CİHAZ SAHİBİ (DEVICE OWNER) - KAYIP CİHAZ SÜRECİ
 
 ### **Adım 1: Kayıt ve Giriş**
-```
-Kullanıcı → Ana Sayfa → "Kayıt Ol" ; Ad + Soyad + Email + Şifre + Hizmet ŞArtları ve Gizlilik Politikası Kabulü → Giriş
-Kullanıcı → Ana Sayfa → "Kayıt Ol" ; Google ile Giriş Yap veya Apple ile Giriş Yap → Giriş
-```
-Kayıt Formu (RegisterPage.tsx)
-Kullanıcı kayıt formunda şu bilgiler toplanır:
-Email (zorunlu)
-Şifre (zorunlu)
-Ad (firstName) (zorunlu)
-Soyad (lastName) (zorunlu)
-Kullanım şartları onayı (zorunlu)
 
-Kayıt İşlemi (AppContext.tsx - register fonksiyonu)
-const register = async (userData, pass: string): Promise<boolean> => {
-  // Supabase Auth'a kayıt
-  const { data: signUpData, error } = await supabase.auth.signUp({
-    email: userData.email,
-    password: pass,
-    options: {
-      data: {
-        first_name: userData.firstName,
-        last_name: userData.lastName,
-        full_name: userData.fullName,
-      },
-    },
-  });
-  
-  // Profil tablosuna kayıt
-  await createUserProfile(signUpData.user.id, {
-    firstName: userData.firstName,
-    lastName: userData.lastName,
-  });
+**GÜNCELLEME (bu oturumda değişti):** E-posta/şifre ile kayıt tamamen kaldırıldı. `RegisterPage.tsx`, `ResetPasswordPage.tsx` ve `AppContext.tsx`'teki `register()`/`login()`/`resetPassword()` fonksiyonları silindi. Artık **tek giriş ekranı** var (`LoginPage.tsx`) ve sadece Google/Apple OAuth ile çalışıyor — hem yeni kullanıcı hem mevcut kullanıcı aynı ekranı kullanır.
+
+```
+Kullanıcı → Ana Sayfa → "Giriş Yap" → Google ile Devam Et veya Apple ile Devam Et → Giriş
+```
+
+Giriş İşlemi (`AppContext.tsx` - `signInWithOAuth` fonksiyonu)
+```typescript
+const signInWithOAuth = async (provider: 'google' | 'apple'): Promise<{success: boolean; error?: string}> => {
+  const { error } = await supabase.auth.signInWithOAuth({ provider });
+  // İlk girişte Supabase otomatik kullanıcı oluşturur, session dönüşünde
+  // userprofile tablosuna kayıt açılır (createUserProfile).
+  // Rol ataması app_metadata.role üzerinden okunur (getRoleFromAppMetadata).
 }
+```
+
+**Neden değişti:** E-posta/şifre kaydı sahte/geçersiz adreslerle veri kirliliğine açıktı, ayrıca Supabase'in "Confirm email" ayarı açıkken `signUp()` sonrası dönen `session: null` durumu kontrol edilmediği için kullanıcı arayüzde "giriş yapmış" görünüp gerçek bir oturumu olmadan storage RLS hatalarına düşüyordu. OAuth girişlerinde sağlayıcı e-postayı doğruladığı için bu sorun kökünden kalkıyor.
 ---
 Veri Yazılan Tablolar
 A. Supabase Auth Tablosu (auth.users)
@@ -283,7 +271,6 @@ INSERT INTO devices (
   description,          -- Açıklama (text, nullable)
   "rewardAmount",       -- Ödül miktarı (numeric, nullable)
   "invoice_url",        -- Fatura URL'si (text, nullable) - Kayıp cihaz için fatura, bulunan cihaz için fotoğraf URL'leri (virgülle ayrılmış)
-  "exchangeConfirmedBy", -- Onaylayanlar array (uuid[], default '{}')
   created_at,           -- now()
   updated_at,           -- now()
   lost_date,            -- Kayıp tarihi (date, nullable)
@@ -1675,8 +1662,10 @@ Escrow Tutarı:
 ## 🟢 CİHAZ BULAN (FINDER) - BULUNAN CİHAZ SÜRECİ
 
 ### **Adım 1: Kayıt ve Giriş**
+
+Sahip tarafındaki Adım 1 ile aynı — tek giriş ekranı, sadece Google/Apple OAuth. Ayrı bir kayıt formu yok (bkz. yukarıdaki "GÜNCELLEME" notu).
 ```
-Kullanıcı → Ana Sayfa → "Kayıt Ol" → Email + Şifre → Giriş
+Kullanıcı → Ana Sayfa → "Giriş Yap" → Google ile Devam Et veya Apple ile Devam Et → Giriş
 ```
 
 **Sorular:**
@@ -1758,7 +1747,6 @@ INSERT INTO devices (
   status,               -- 'reported' (text)
   color,                -- Cihaz rengi (text, nullable)
   description,          -- Açıklama (text, nullable)
-  "exchangeConfirmedBy", -- Onaylayanlar array (uuid[], default '{}')
   created_at,           -- now()
   updated_at,           -- now()
   found_date,           -- Bulunma tarihi (date, nullable)
@@ -1800,16 +1788,15 @@ INSERT INTO notifications (
 
 ### **Adım 3: Eşleşme Bulundu**
 ```
-Sistem → Eşleşme buldu → Status: MATCHED
+Sistem → Eşleşme buldu (serialNumber+model) → Finder: status=MATCHED, Owner: status=PAYMENT_PENDING
 ```
 
-**Database:**
+**Database:** Eşleşme FK ile değil, `serialNumber`+`model` eşleşmesiyle bulunuyor (bkz. madde 11 "Eşleştirme Kodu") — `matched_with_user_id`/`matched_at` diye bir kolon yok. Sadece iki `devices` satırının `status`'u güncelleniyor:
 ```typescript
-devices {
-  status: "MATCHED"
-  matched_with_user_id: UUID  // Cihaz sahibinin ID'si mi?
-  matched_at: timestamp
-}
+// Bulan kişinin satırı
+devices { status: "matched" }
+// Cihaz sahibinin satırı
+devices { status: "payment_pending" }
 ```
 
 **Dashboard'da Görünen:**
@@ -1995,42 +1982,42 @@ Kargo firması cihazı sahibine teslim etti. Onay bekleniyor.
 
 ### **Adım 10: Ödül Alma**
 ```
-Cihaz sahibi onayladı → Escrow released → Para transfer
+Cihaz sahibi onayladı (veya 48 saat sonra sistem otomatik onayladı) → Escrow released → devices.status: completed
 ```
-Status: completed → Ödül transfer edildi
+
+**ÖNEMLİ — gerçek durum (Paynet araştırması + kod, bu oturumda netleşti):** Escrow release, Paynet'teki tutulan (`held`) parayı **bize (iFoundAnApple merchant hesabına)** serbest bırakıyor — bulan kişinin IBAN'ına otomatik bir Paynet transferi **yok**. Paynet dokümantasyonunun 230 sayfalık tam indeksinde herhangi bir "bayiye ödeme/çekim" endpoint'i bulunmuyor. Bulan kişiye asıl IBAN ödemesi şu an **manuel, sistem dışı bir adım** — aşağıdaki ekran metinleri buna göre "serbest bırakıldı" diyor, "IBAN'a transfer edildi" demiyor.
 ---
 
 **Dashboard'da Görünen:**
-- Mesaj: "Ödülünüz hesabınıza aktarıldı" 
+- Mesaj: "Teslim onaylandı, ödülünüzün serbest bırakılması bekleniyor"
 ---
 DeviceDetailPage (Cihaz Detay Sayfası):
 Dashboard → Cihaz Kartına Tıkla → DeviceDetailPage açılır
 DeviceDetailPage içeriği
 ✅
-İşlem Başarıyla Tamamlandı!
-Yardımın için teşekkür ederiz! Ödülün, belirttiğin IBAN adresine transfer edildi.
+İşlem Tamamlandı!
+Cihaz sahibi teslim aldığını onayladı. Ödülünüzün serbest bırakılması bekleniyor.
 -"Bulunan Cihaz Detayları" Kartı
 Bulunma Tarihi:
 Bulunma Yeri:
 ... (diğer detaylar)
 -"İşlem Durumu" Kartı
-Durum: İşlem tamamlandı. Ödülün gönderildi.
--"Durum Bilgisi" Kartı (5 numaralı seçenek aktif yeşil renk. diğerleri pasif durumda.)
-1 Cihaz için eşleşme bekleniyor
-2 Eşleşme bulundu
-3 Cihazın Kargo Firmasına Teslim Edilmesi
-4 Cihaz Sahibi Teslim Aldığında
-5 İşlem Tamamlandı
-Takas tamamlandığında ödülünüz hesabınıza aktarılacak. (Metin "aktarıldı" olarak güncellenebilir)
+Durum: İşlem tamamlandı ve onaylandı. Ödülün bulan kişiye serbest bırakılması bekleniyor.
+-"Durum Bilgisi" Kartı (4 ve 5 numaralı seçenekler aktif yeşil ✓. diğerleri pasif durumda.)
+1 Cihaz için eşleşme bekleniyor ✓
+2 Ödeme tamamlandı ✓
+3 Cihazın Kargo Firmasına Teslim Edilmesi ✓
+4 Cihaz Sahibi Teslim Alındığında ✓ — Teslim aldığınızı onayladınız.
+5 İşlem Tamamlandı ✓ — Ödülünüzün serbest bırakılması bekleniyor (hizmet bedeli düşülerek).
 ---
 
-**Transfer Süreci:**
-- IBAN'a otomatik transfer 
-- Ödeme sağlayıcı ile yapılıyor
-- Transfer süresi: Anında mı, 1-3 iş günü mü?
+**Transfer Süreci (netleşen kısım):**
+- Escrow release, parayı Paynet'ten **bize** serbest bırakır — bulan kişinin IBAN'ına otomatik gitmez.
+- Bulan kişiye asıl IBAN ödemesi henüz sistemde **implemente edilmedi** — manuel banka transferi olarak ele alınması gerekiyor (bkz. madde 7 "Ödeme Transfer").
+- Otomatik onay: Kargo "teslim edildi" bilgisinden 48 saat sonra, sahip hiçbir işlem yapmazsa (`autoConfirmStaleDeliveries` cron, saatte bir çalışır), sistem otomatik onaylar — `package_delivered_confirm_auto` (bulan kişiye) ve `delivery_auto_confirmed` (sahibe) bildirimleri gider.
 
 **Bildirimler:**
-- In-APP
+- In-app: `escrow_released_finder`, `package_delivered_confirm_auto` (otomatik onaylandıysa)
 
 ---
 
@@ -2059,85 +2046,84 @@ Cevap: Evet. Cihaz sahibi için ödeme güvenliği, cihazı bulan için ise öd�
 - Tamamen anonim.
 
 ### **4. Zaman Sınırları**
-- Ödeme için zaman sınırı Sürecin kilitlenmemesi için 72 saat gibi bir zaman sınırı konulması, cihazı bulan kişinin mağduriyetini önler. Süre dolduğunda eşleşme iptal edilebilir.
-- Kargo için zaman sınırı 3 gün
-- Onay için otomatik onay süresi 2 gün
-Kargo API'sinden "teslim edildi" bilgisi geldikten 48 saat sonra, eğer kullanıcı itiraz etmezse sistemin işlemi otomatik olarak CONFIRMED durumuna geçirmesi, bulan kişinin ödülünü almasını garanti altına alır.
+- Ödeme için zaman sınırı: henüz implemente edilmedi (72 saat önerisi hâlâ açık).
+- Kargo için zaman sınırı: henüz implemente edilmedi.
+- **Onay için otomatik onay süresi: 48 saat — İMPLEMENTE EDİLDİ (bu oturumda).** `cargo.service.ts`'te saatte bir çalışan `autoConfirmStaleDeliveries()` adında bir `@Cron` job var: `cargo_shipments.delivered_at` üzerinden 48 saat geçmiş ve `devices.status` hâlâ `'delivered'` (yani `'disputed'`/`'confirmed'` değil) olan cihazları bulup sahibi adına otomatik onaylıyor, escrow'u serbest bırakıyor ve her iki tarafa bildirim gönderiyor (`delivery_auto_confirmed` sahibe, `package_delivered_confirm_auto` bulan kişiye).
 
 ### **5. İptal/İade ve İstisnai Durum Yönetimi**
 Platform, sürecin sorunsuz ilerlemediği durumlar için aşağıdaki senaryoları yönetir:
 
-A) Kullanıcı Kaynaklı İptal (Kargo Öncesi)
-Senaryo: Cihaz sahibi ödeme yaptıktan sonra ama cihaz henüz kargoya verilmeden önce fikrini değiştirir.
-Akış:
-Cihaz sahibi "İşlemi İptal Et" talebinde bulunur.
-devices.status -> CANCELLED olarak güncellenir.
-Escrow'daki para, hizmet bedeli kesintisi yapılarak veya yapılmadan (iş kurallarına göre) cihaz sahibine tam iade edilir.
-Cihazı bulan kişiye bildirim gönderilir.
+**A) Kullanıcı Kaynaklı İptal (Kargo Öncesi) — İMPLEMENTE EDİLDİ (bu oturumda)**
+Senaryo: Cihaz sahibi ödeme yaptıktan sonra ama cihaz henüz kargoya verilmeden önce (`cargo_status` hâlâ `picked_up` öncesi) fikrini değiştirir.
+Gerçek akış:
+- Sahip, `DeviceDetailPage`'de (kargo henüz yollanmamışken görünen adım 3'te) **"İşlemi İptal Et"** butonuna basar, isteğe bağlı bir sebep yazar.
+- Backend: `PATCH /cargo/shipments/:deviceId/cancel` — `cargo.service.ts cancelByOwner()`. Kargo zaten `picked_up`/`in_transit`/`out_for_delivery`/`delivered` ise 400 döner (artık self-cancel edilemez).
+- `payments.service.ts cancelPaymentBeforeShipment()`, Paynet'in `escrow_status_update` (status=3, "Red/Reject") endpoint'ini çağırır — tutulan tutar **anında** kart sahibine (cihaz sahibine) iade edilir, kesinti yok.
+- `payments.payment_status='cancelled'`, `escrow_status='refunded'`, `escrow_accounts.status='refunded'`.
+- `devices.status` → her iki taraf da `CANCELLED` olur, bulan kişiye `shipment_cancelled_by_owner` bildirimi gider.
 
-B) Kargo Sürecindeki Sorunlar
+**B) Kargo Sürecindeki Sorunlar — İMPLEMENTE EDİLDİ (admin panelinden elle, gerçek kargo API'si yok)**
 Senaryo 1: Teslimat Başarısız (FAILED_DELIVERY)
-Neden: Kargo firması API'sinden "adreste bulunamadı", "yanlış adres" gibi bir durum bildirimi gelir.
-Akış:
-shipments.status -> failed_delivery olarak güncellenir.
-devices.status -> FAILED_DELIVERY olarak güncellenir.
-Cihaz sahibine "Teslimat Başarısız" bildirimi gönderilir ve adresini kontrol etmesi veya kargo şubesiyle iletişime geçmesi istenir.
-Belirli bir süre (örn: 24 saat) içinde sorun çözülmezse, süreç "İade" senaryosuna dönüşebilir.
-Senaryo 2: Kargonun İade Edilmesi (RETURNED)
-Neden: Teslimat birkaç denemeden sonra başarısız oldu veya alıcı kargoyu kabul etmedi. Kargo firması API'si "iade sürecinde" bilgisi geçer.
-Akış:
-shipments.status -> returned olarak güncellenir.
-devices.status -> RETURNED olarak güncellenir.
-Bu, bir admin müdahalesi gerektiren ciddi bir durumdur. Admin paneline bildirim düşer.
-Admin, durumu inceledikten sonra paranın kısmi veya tam iadesine karar verir. Genellikle kargo ücreti kesilerek iade yapılır. Cihaz, bulan kişiye geri gönderilir.
+- Gerçek akış: Kargo firması API'si yok — admin, telefonla/takip sayfasından öğrendiği "adreste bulunamadı" bilgisini **admin panelinden elle** işaretler (`CargoOpsPanel.tsx`'te "Teslimat Başarısız" butonu, sebep notu isteğe bağlı).
+- `cargo.service.ts updateStatus()`: `cargo_shipments.status/cargo_status = 'failed_delivery'`, `devices.status` (her iki taraf) → `FAILED_DELIVERY`, sahibe `delivery_failed` bildirimi.
+- Otomatik 24 saatlik "iade"ye dönüşme mantığı **implemente edilmedi** — admin manuel olarak "Bulan Kişiye İade Et" butonuna basmalı.
 
-C) Cihaz Sahibinin İtirazı (DISPUTED)
-Senaryo: Cihaz teslim edildi (delivered) ancak cihaz sahibi "Sorun Var, İtiraz Et" butonuna bastı (yanlış cihaz, hasarlı vb.).
-Akış:
-devices.status -> DISPUTED olarak güncellenir.
-Escrow'daki para kilitli kalır.
-Admin incelemesi başlar ve süreci karara bağlar.
+Senaryo 2: Kargonun İade Edilmesi (RETURNED)
+- Gerçek akış: Admin, `FAILED_DELIVERY` durumundaki bir kargoyu panelden "Bulan Kişiye İade Et" ile `RETURNED`'a alır.
+- `devices.status` (her iki taraf) → `RETURNED`, ikisine de bildirim.
+- **Otomatik kısmi/tam para iadesi implemente edilmedi** — escrow'a hiç dokunulmuyor, admin gerekirse ayrıca manuel ilgilenmeli.
+
+**C) Cihaz Sahibinin İtirazı (DISPUTED) — İMPLEMENTE EDİLDİ**
+Senaryo: Cihaz teslim edildi (`delivered`) ancak cihaz sahibi "Evet Teslim Aldım" yerine **"Sorun Var, İtiraz Et"** butonuna bastı (yanlış cihaz, hasarlı vb.), bir sebep yazdı.
+Gerçek akış:
+- `PATCH /cargo/shipments/:deviceId/dispute` — `disputeReceipt()`. `devices.status` (her iki taraf) → `DISPUTED`. Escrow'a dokunulmaz, kilitli kalır.
+- Admin panelinde ayrı bir **"Anlaşmazlıklar"** bölümü, itiraz sebebini gösterir; admin **"Onayla (Teslim Alındı Sayılsın)"** veya **"Bulan Kişiye İade Et"** ile çözer (`PATCH /cargo/shipments/:deviceId/resolve-dispute` — `resolveDispute()`). "Onayla" seçilirse normal onay gibi escrow serbest bırakılır.
 
 ### **6. Güvenlik**
-- Kimlik doğrulama zorunlu mu?
-- Dolandırıcılık önleme var mı?
+- Kimlik doğrulama: Sadece Google/Apple OAuth (bkz. Adım 1 güncellemesi) — e-posta/şifre kaldırıldı.
 - Sahte cihaz kontrolü: kayıp cihaz kaydı sırasında cihazın faturası isteniliyor. 
 - Sahte seri numarası kontrolü: Kayıp ilanı sırasında istenilen fatura ile kontrol sağlanacak. 
-- Aynı kullanıcı, aynı model seri numaralı cihazı hem kayıp hem bulunan cihaz olarak kaydedemez.
-- Aynı kullanıcı bir günde 2 den fazla bulunan cihaz kaydedemez. Sürekli bulunan cihaz kaydı gerçekleştiren hesaplar incelemeye alınır. 
+- **Aynı kullanıcı, aynı model+seri numaralı cihazı iki kez kaydedemez — İMPLEMENTE EDİLDİ (bu oturumda).** `AppContext.tsx addDevice()`, insert'ten önce aynı `userId`+`model`+`serialNumber` ile mevcut bir kayıt olup olmadığını kontrol ediyor, varsa "Bu cihaz için zaten bir kaydınız var." hatasıyla reddediyor.
+- **Günde en fazla 2 cihaz kaydı — İMPLEMENTE EDİLDİ (bu oturumda).** `addDevice()`, son 24 saatte o kullanıcının açtığı toplam cihaz kaydı sayısını sayıyor, 2'ye ulaştıysa "Günde en fazla 2 cihaz kaydı yapabilirsiniz." hatası veriyor. (Not: eskiden "günde 2'den fazla **bulunan** cihaz" deniyordu — kayıp+bulunan toplamı olarak genişletildi.)
 
 ### **7. Ödeme Transfer**
-- Bulan kişiye para nasıl transfer ediliyor?
-- Ödeme sağlayıcı ile yapılıyor
-- IBAN'a otomatik transfer
-- Transfer süresi Bu, kullanılan ödeme sağlayıcısına bağlıdır. Genellikle "1-3 iş günü" sürer. Kullanıcıya bu yönde bir bilgilendirme yapılmalıdır.
-- Transfer ücreti yok
+- Bulan kişiye para nasıl transfer ediliyor? **Bu oturumda netleşti**: Escrow release, Paynet'teki tutulan parayı **bize** (iFoundAnApple merchant hesabına) serbest bırakıyor. Paynet'in tüm dokümantasyon indeksinde (230 sayfa) bir "bayiye ödeme/çekim" endpoint'i yok — Paynet'in bulan kişinin IBAN'ına otomatik transfer yaptığına dair hiçbir kanıt yok.
+- **Bulan kişiye asıl IBAN ödemesi implemente edilmedi** — sistem dışı, manuel bir banka transferi olarak ele alınmalı.
+- Transfer süresi / ücreti: Paynet'in bize yaptığı kısım için bilinmiyor; bizim bulan kişiye yapacağımız manuel transfer içinse bankaya bağlı.
 
 ### **8. Bildirimler**
 Hangi aşamalarda hangi bildirimler gidiyor?
 - In-app notification
 - Push notification (mobil için)
 
-Bildirim Matrisi, süreç kontrol edilip onaylanacak
+**Bildirim Matrisi — gerçek kodda kullanılan `message_key`'ler (bu oturumda düzeltildi).** Eskiden buradaki tablo kodla hiç eşleşmiyordu (`device_registered`, `payment_reminder`, `reward_transferred` gibi hiçbir yerde kullanılmayan key'ler vardı); hem backend'in gönderdiği gerçek key'ler hem `constants.ts`'teki EN/TR çevirileri senkronize edildi:
 
-Olay	                                      Alıcı	Mesaj             Anahtarı	                                Tip
-Cihaz kaydedildi	                          Kayıt eden	        device_registered	                            info
-Eşleşme bulundu	                            Her iki taraf	      device_matched_owner / device_matched_finder	success
-Ödeme bekleniyor	                          Cihaz sahibi	      payment_reminder	                            warning
-Ödeme alındı	                              Bulan kişi	        payment_received_please_ship	                success
-Teslim kodu oluşturuldu	                    Bulan kişi	        delivery_code_ready	                          info
-Kargoya verildi	                            Cihaz sahibi	      package_shipped	                              info
-Kargo yolda	                                Her iki taraf	      package_in_transit	                          info
-Teslim edildi	                              Cihaz sahibi	      package_delivered_confirm	                    warning
-Otomatik onay yaklaşıyor (24 saat kaldı)	  Cihaz sahibi	      auto_confirm_reminder	                        warning
-Onay verildi	                              Bulan kişi	        reward_released	                              success
-Para transfer edildi	                      Bulan kişi	        reward_transferred	                          success
+| Olay | Alıcı | Mesaj Anahtarı | Tip |
+|---|---|---|---|
+| Eşleşme bulundu | Sahip / Bulan | `matchFoundOwner` / `matchFoundFinder` | info |
+| Ödeme tamamlandı | Sahip / Bulan | `payment_completed_owner` / `payment_received_finder` | success/info |
+| Ödeme başarısız | Sahip | `payment_failed` | warning |
+| Teslim kodu hazır | Bulan | `delivery_code_ready` | info |
+| Kargoya verildi (picked_up) | Sahip / Bulan | `package_in_transit` / `package_shipped` | info |
+| Kargo yolda / dağıtımda | Sahip | `package_in_transit` | info |
+| Kargo firması teslim etti | Sahip | `package_delivered_by_carrier` | info |
+| Teslimat başarısız | Sahip | `delivery_failed` | **warning** |
+| İade ediliyor | Sahip / Bulan | `package_returned` / `package_returned_to_you` | **warning** |
+| İptal (admin, kargo sonrası) | Sahip / Bulan | `shipment_cancelled` | **warning** |
+| İptal (sahip, kargo öncesi + iade) | Sahip / Bulan | `payment_cancelled_refunded` / `shipment_cancelled_by_owner` | info/**warning** |
+| Sahip onayladı | Bulan | `package_delivered_confirm` | info |
+| Sahip itiraz etti | Bulan | `delivery_disputed` | **warning** |
+| İtiraz çözüldü | Sahip / Bulan | `dispute_resolved_confirmed` / `dispute_resolved_returned` | info |
+| 48 saat sonra otomatik onaylandı | Sahip / Bulan | `delivery_auto_confirmed` / `package_delivered_confirm_auto` | info |
+| Escrow serbest bırakıldı | Sahip / Bulan | `escrow_released_owner` / `escrow_released_finder` | success |
+
+Push notification (mobil) henüz implemente edilmedi, sadece in-app.
 
 
 ### **9. Ücret Hesaplama** 
-- Gateway komisyonu: %3.43 (toplam üzerinden)
-- Kargo ücreti sabit: 250.00 TL
-- Bulan kişi ödülü: %20 (toplam üzerinden)
+- Gateway komisyonu: %3.43 (toplam üzerinden) — `utils/feeCalculation.ts` `FEE_STRUCTURE.GATEWAY_FEE_PERCENTAGE` ile doğrulandı ✅
+- Kargo ücreti sabit: 250.00 TL — `FEE_STRUCTURE.CARGO_FEE` ile doğrulandı ✅
+- Bulan kişi ödülü: %20 (toplam üzerinden) — `FEE_STRUCTURE.REWARD_PERCENTAGE` ile doğrulandı ✅
 - Hizmet bedeli: Geriye kalan tutar
 - Net payout hesaplama formülü:
   ```
@@ -2147,36 +2133,32 @@ Para transfer edildi	                      Bulan kişi	        reward_transferre
   rewardAmount = totalAmount * 0.20
   serviceFee = totalAmount - gatewayFee - cargoFee - rewardAmount
   netPayout = rewardAmount
+  ```
 
 ### **10. Escrow Release Conditions**
-Escrow'u serbest bırakacak koşullar:
+Escrow'u serbest bırakacak koşullar — üçü de bu oturumda implemente edildi:
 
-**A. Manuel Onay:**
-- Cihaz sahibinin "Onayla" butonuna basması
-- `delivery_confirmations` kaydı oluşturulması
-- `confirmation_type` = 'device_received'
+**A. Manuel Onay ✅**
+- Cihaz sahibinin `DeviceDetailPage`'de "Evet, Cihazımı Teslim Aldım" butonuna basması
+- `cargo.service.ts markReceived()` → paylaşılan `confirmReceipt()` → `paymentsService.releaseEscrow()`
+- Not: `delivery_confirmations` tablosu tasarlanmış ama **hiç kullanılmıyor** — hiçbir onay/itiraz olayı bu tabloya yazmıyor, tamamen boş duruyor. Kanıt/denetim amaçlı ileride kullanılabilir ama şu an implemente değil.
 
-**B. Otomatik Onay:**
-- Kargonun teslim edilmesinden (`cargo_shipments.delivered_at`) itibaren 48 saat geçmesi
-- Bu süre içinde kullanıcıdan itiraz gelmemesi (`devices.status` != 'disputed')
-- Sistem otomatik olarak `delivery_confirmations` kaydı oluşturur
-- `confirmation_type` = 'timeout_release'
+**B. Otomatik Onay (48 saat) ✅**
+- `cargo.service.ts autoConfirmStaleDeliveries()` — saatte bir çalışan `@Cron(CronExpression.EVERY_HOUR)`
+- `cargo_shipments.delivered_at` üzerinden 48 saat geçmiş ve `devices.status` hâlâ `'delivered'` olan (onaylanmamış/itiraz edilmemiş) cihazları bulur, aynı `confirmReceipt()` mantığını "sistem adına" çalıştırır
 
-**C. Admin Manuel Serbest Bırakma:**
-- Admin panelinden manuel olarak escrow serbest bırakılabilir
-- `confirmation_type` = 'manual_release'
-- Sadece admin kullanıcılar bu işlemi yapabilir
+**C. Admin Manuel Serbest Bırakma ✅**
+- `CargoOpsPanel.tsx`'te ayrı bir **"Escrow Serbest Bırakma Bekliyor"** bölümü — `devices.status='confirmed'` olup (otomatik release hata verdiği için) `'completed'`'a hiç geçmemiş cihazları listeler
+- `PATCH /cargo/shipments/:deviceId/admin-release-escrow` — `cargo.service.ts adminReleaseEscrow()`. `/payments/release-escrow` doğrudan admin tarafından çağrılamaz (payer_id/receiver_id şartı var) — bu endpoint sahibin userId'siyle dahili çağrı yapar.
 
-**Release API Çağrısı:**
+**Gerçek Release API çağrısı** (eski `releaseEscrowAPI({confirmationType, confirmedBy, ...})` örneği artık geçersiz — o wrapper dosyası bu oturumda silindi):
 ```typescript
-await releaseEscrowAPI({
+// POST /v1/payments/release-escrow
+{
   paymentId: string,
   deviceId: string,
   releaseReason: string,
-  confirmationType: 'device_received' | 'timeout_release' | 'manual_release',
-  confirmedBy: string, // User ID
-  additionalNotes?: string
-});
+}
 ```
 
 ### **11. Eşleşme Mantığı**
@@ -2188,9 +2170,10 @@ await releaseEscrowAPI({
 - Biri `status = 'lost'`, diğeri `status = 'reported'` olmalı
 
 **Güvenlik Kısıtlamaları:**
-- Aynı kullanıcı, aynı model ve seri numaralı cihazı hem kayıp hem bulunan olarak kaydedemez (uygulama seviyesinde kontrol)
+- **Aynı kullanıcı, aynı model+seri numaralı cihazı iki kez kaydedemez — İMPLEMENTE EDİLDİ (bu oturumda, `addDevice()` içinde uygulama seviyesinde kontrol).**
+- **Günde en fazla 2 cihaz kaydı — İMPLEMENTE EDİLDİ (bu oturumda).**
 - Veritabanı seviyesinde `UNIQUE` constraint önerilmez çünkü aynı cihaz hem kayıp hem bulunan olarak kaydedilebilir (farklı kullanıcılar tarafından)
-- Sistem, eşleşme bulunduğunda her iki cihazın `status`'unu `'matched'` olarak günceller
+- **Düzeltme (bu bölüm eskiden kendi içinde çelişiyordu):** Eşleşme bulunduğunda iki cihazın `status`'u AYNI değere değil, FARKLI değerlere güncelleniyor — kaybeden `'payment_pending'`, bulan `'matched'` olarak kalıyor (bkz. yukarıdaki Adım 4/Adım 3, ve gerçek kod aşağıda).
 
 **Eşleştirme Kodu (AppContext.tsx - addDevice fonksiyonu):**
 ```typescript
@@ -2220,11 +2203,11 @@ if (newDevice.status === DeviceStatus.REPORTED) {
 ```
 
 
-### **12. Admin Paneli**
-- Admin hangi aşamalara müdahale edebiliyor?
-- Manuel escrow release yapabiliyor mu?
-- İtirazları admin çözüyor
-- İptal/iade işlemlerini admin yapıyor
+### **12. Admin Paneli** (`CargoOpsPanel.tsx` — hepsi bu oturumda cevaplandı/implemente edildi)
+- **Admin hangi aşamalara müdahale edebiliyor?** Kargo durumunu ileri (`created→picked_up→in_transit→out_for_delivery→delivered`) ilerletebiliyor; ayrıca istisna aksiyonları var: "Teslimat Başarısız", "Bulan Kişiye İade Et", "İptal Et".
+- **Manuel escrow release yapabiliyor mu?** Evet — "Escrow Serbest Bırakma Bekliyor" bölümünde, `devices.status='confirmed'` olup otomatik release başarısız olan cihazlar için.
+- **İtirazları admin çözüyor mu?** Evet — ayrı "Anlaşmazlıklar" bölümünde "Onayla" veya "Bulan Kişiye İade Et" ile.
+- **İptal/iade işlemlerini admin yapıyor mu?** Kargo sonrası istisnalar (`failed_delivery`/`returned`/admin-tetikli `cancelled`) admin panelinden; kargo öncesi iptal + anında para iadesi ise **sahibin kendisi** `DeviceDetailPage`'den yapıyor (admin'in müdahalesine gerek yok).
 
 ---
 
@@ -2239,7 +2222,7 @@ Cihaz Ekle (Kaybettim)                                                  		Cihaz 
       ↓                                                                  		      ↓
      LOST ───────────────────────→   Eşleştirme Yap   ←────────────────────── REPORTED
       ↓                                    	  ↓                                		 ↓
-   MATCHED  ←────────────────────────── Eşleşme Bildir ──────────────────────→ MATCHED
+PAYMENT_PENDING ←──────────────────── Eşleşme Bildir ──────────────────────→ MATCHED
       ↓                                                                     			 ↓
   Ödeme Yap                                                            			 Ödeme Bekleniyor
       ↓                                                                     		         ↓
@@ -2262,11 +2245,11 @@ payment_completed ←────────────────── Escr
       ↓
       └──────────────────────────┐
                                		  ↓
-   CONFIRMED ←──────────────── Onay Alındı
+CONFIRMED ←──────────────── Onay Alındı (elle VEYA 48s sonra otomatik)
                               	          ↓
                       	         Escrow Serbest Bırak
                                           ↓
-                         Ödemeleri Dağıt (Ödül, Komisyon...)
+        Ödeme BİZE (merchant) geçer — bulan kişiye IBAN transferi ayrı, manuel adım
                                           ↓
    COMPLETED ←────────────────── İşlem Tamamlandı ───────────────────────→ COMPLETED
 
